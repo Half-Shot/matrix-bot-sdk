@@ -13,6 +13,7 @@ import { MatrixPresence } from "./models/MatrixPresence";
 import { Metrics } from "./metrics/Metrics";
 import { timedMatrixClientFunctionCall } from "./metrics/decorators";
 import { AdminApis } from "./AdminApis";
+import { MatrixRoomMemberEvent, MembershipEnum } from "./models/Events";
 
 /**
  * A client that is capable of interacting with a matrix homeserver.
@@ -675,6 +676,22 @@ export class MatrixClient extends EventEmitter {
         return this.doRequest("GET", "/_matrix/client/r0/rooms/" + encodeURIComponent(roomId) + "/joined_members").then(response => {
             return Object.keys(response['joined']);
         });
+    }
+
+    /**
+     * Gets members in a room.
+     * @param {string} roomId The room ID to get the members of.
+     * @param {string} membership Get members who are of this type. Leave undefined if no filtering is needed.
+     * @param {string} notMembership Do not get members who are of this type. Leave undefined if no filtering is needed.
+     * @returns {Promise<MatrixRoomMemberEvent[]>} The members in this room
+     */
+    @timedMatrixClientFunctionCall()
+    public async getRoomMembers(roomId: string, membership?: MembershipEnum, notMembership?: MembershipEnum) {
+        const res = await this.doRequest("GET", "/_matrix/client/r0/rooms/" + encodeURIComponent(roomId) + "/members", {
+            membership,
+            not_membership: notMembership
+        });
+        return res.chunk as MatrixRoomMemberEvent[];
     }
 
     /**
