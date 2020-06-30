@@ -1291,7 +1291,7 @@ export class MatrixClient extends EventEmitter {
      * @returns {Promise<any>} Resolves to the response (body), rejected if a non-2xx status code was returned.
      */
     @timedMatrixClientFunctionCall()
-    public doRequest(method, endpoint, qs = null, body = null, timeout = 60000, raw = false, contentType = "application/json", noEncoding = false): Promise<any> {
+    public doRequest(method, endpoint, qs = null, body: any|null = null, timeout = 60000, raw = false, contentType = "application/json", noEncoding = false): Promise<any> {
         if (!endpoint.startsWith('/'))
             endpoint = '/' + endpoint;
 

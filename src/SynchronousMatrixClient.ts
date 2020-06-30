@@ -44,7 +44,7 @@ export abstract class SynchronousMatrixClient extends MatrixClient {
      * @param {any} event The account data event.
      * @returns {Promise<any>} Resolves when complete.
      */
-    protected onAccountData(event: any): Promise<any> {
+    protected async onAccountData(event: any): Promise<any> {
         return;
     }
 
@@ -54,7 +54,7 @@ export abstract class SynchronousMatrixClient extends MatrixClient {
      * @param {any} event The room account data event.
      * @returns {Promise<any>} Resolves when complete.
      */
-    protected onRoomAccountData(roomId: string, event: any): Promise<any> {
+    protected async onRoomAccountData(roomId: string, event: any): Promise<any> {
         return;
     }
 
@@ -64,7 +64,7 @@ export abstract class SynchronousMatrixClient extends MatrixClient {
      * @param {any} event The event.
      * @returns {Promise<any>} Resolves when complete.
      */
-    protected onRoomLeave(roomId: string, event: any): Promise<any> {
+    protected async onRoomLeave(roomId: string, event: any): Promise<any> {
         return;
     }
 
@@ -74,7 +74,7 @@ export abstract class SynchronousMatrixClient extends MatrixClient {
      * @param {any} event The event.
      * @returns {Promise<any>} Resolves when complete.
      */
-    protected onRoomInvite(roomId: string, event: any): Promise<any> {
+    protected async onRoomInvite(roomId: string, event: any): Promise<any> {
         return;
     }
 
@@ -84,7 +84,7 @@ export abstract class SynchronousMatrixClient extends MatrixClient {
      * @param {any} event The event.
      * @returns {Promise<any>} Resolves when complete.
      */
-    protected onRoomJoin(roomId: string, event: any): Promise<any> {
+    protected async onRoomJoin(roomId: string, event: any): Promise<any> {
         return;
     }
 
@@ -94,7 +94,7 @@ export abstract class SynchronousMatrixClient extends MatrixClient {
      * @param {any} event The event.
      * @returns {Promise<any>} Resolves when complete.
      */
-    protected onRoomMessage(roomId: string, event: any): Promise<any> {
+    protected async onRoomMessage(roomId: string, event: any): Promise<any> {
         return;
     }
 
@@ -104,7 +104,7 @@ export abstract class SynchronousMatrixClient extends MatrixClient {
      * @param {any} event The event.
      * @returns {Promise<any>} Resolves when complete.
      */
-    protected onRoomArchived(roomId: string, event: any): Promise<any> {
+    protected async onRoomArchived(roomId: string, event: any): Promise<any> {
         return;
     }
 
@@ -114,7 +114,7 @@ export abstract class SynchronousMatrixClient extends MatrixClient {
      * @param {any} event The event.
      * @returns {Promise<any>} Resolves when complete.
      */
-    protected onRoomUpgraded(roomId: string, event: any): Promise<any> {
+    protected async onRoomUpgraded(roomId: string, event: any): Promise<any> {
         return;
     }
 
@@ -124,7 +124,7 @@ export abstract class SynchronousMatrixClient extends MatrixClient {
      * @param {any} event The event.
      * @returns {Promise<any>} Resolves when complete.
      */
-    protected onRoomEvent(roomId: string, event: any): Promise<any> {
+    protected async onRoomEvent(roomId: string, event: any): Promise<any> {
         return;
     }
 }
