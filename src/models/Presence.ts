@@ -1,4 +1,4 @@
-import { PresenceEventContent, PresenceState } from "./events/PresenceEvent";
+import { PresenceEventContent, PresenceState } from "./events/PresenceEvent.ts";
 
 /**
  * Presence information for a user.
@@ -18,21 +18,21 @@ export class Presence {
     /**
      * The status message which accompanies this presence. May be falsey.
      */
-    public get statusMessage(): string {
+    public get statusMessage(): string|undefined {
         return this.presence.status_msg;
     }
 
     /**
      * How long ago in milliseconds this presence was changed. May be falsey.
      */
-    public get lastActiveAgo(): number {
+    public get lastActiveAgo(): number|undefined {
         return this.presence.last_active_ago;
     }
 
     /**
      * Whether or not the user is currently active.
      */
-    public get currentlyActive(): boolean {
+    public get currentlyActive(): boolean|undefined {
         return this.presence.currently_active;
     }
 }

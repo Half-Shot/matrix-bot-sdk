@@ -1,4 +1,4 @@
-import { MatrixClient } from "./MatrixClient";
+import { MatrixClient } from "./MatrixClient.ts";
 
 /**
  * Functions for interacting with Matrix prior to having an access token. Intended

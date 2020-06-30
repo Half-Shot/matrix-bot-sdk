@@ -1,4 +1,4 @@
-import { ILogger } from "./ILogger";
+import { ILogger } from "./ILogger.ts";
 
 /**
  * Logs to the console in a plain format. This is the default logger.

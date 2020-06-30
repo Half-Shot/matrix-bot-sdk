@@ -1,5 +1,5 @@
 import * as expect from "expect";
-import { getRequestFn, setRequestFn } from "../src";
+import { getRequestFn, setRequestFn } from "../src.ts";
 
 describe('request', () => {
     it('should return whatever request function was set', () => {

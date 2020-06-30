@@ -1,4 +1,4 @@
-import { IMetricContext } from "./contexts";
+import { IMetricContext } from "./contexts.ts";
 
 /**
  * A simple interface for listening for Metric updates. Should be plugged into

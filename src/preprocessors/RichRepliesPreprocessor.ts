@@ -1,6 +1,6 @@
-import { MatrixClient } from "../MatrixClient";
-import { IPreprocessor } from "./IPreprocessor";
-import { LogService } from "..";
+import { MatrixClient } from "../MatrixClient.ts";
+import { IPreprocessor } from "./IPreprocessor.ts";
+import { LogService } from "../index.ts";
 
 /**
  * Metadata for a rich reply. Usually stored under the "mx_richreply"

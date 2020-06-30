@@ -1,4 +1,4 @@
-import { MatrixAuth } from "../src";
+import { MatrixAuth } from "../src.ts";
 
 // CAUTION: This logs a lot of secrets the console, including the password. Use with caution.
 

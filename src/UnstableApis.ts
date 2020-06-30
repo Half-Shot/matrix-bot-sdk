@@ -1,4 +1,4 @@
-import { MatrixClient } from "./MatrixClient";
+import { MatrixClient } from "./MatrixClient.ts";
 
 /**
  * Represents a profile for a group

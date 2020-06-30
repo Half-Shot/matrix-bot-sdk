@@ -1,5 +1,5 @@
 import * as expect from "expect";
-import { createMinimalEvent } from "./EventTest";
+import { createMinimalEvent } from "./EventTest.ts";
 import { PowerLevelsEvent } from "../../../src";
 
 describe("PowerLevelsEvent", () => {

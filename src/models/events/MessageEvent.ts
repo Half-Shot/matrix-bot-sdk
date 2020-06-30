@@ -1,5 +1,5 @@
-import { RoomEvent } from "./RoomEvent";
-import { EventRedactedError } from "./InvalidEventError";
+import { RoomEvent } from "./RoomEvent.ts";
+import { EventRedactedError } from "./InvalidEventError.ts";
 
 /**
  * The types of messages that are valid in Matrix.

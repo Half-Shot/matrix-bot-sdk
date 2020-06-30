@@ -1,10 +1,11 @@
-import { IFilterInfo } from "../IFilter";
+import { IFilterInfo } from "../IFilter.ts";
 
 /**
  * Represents a storage provider for the matrix client
  * @category Storage providers
  */
 export interface IStorageProvider {
+
     /**
      * Sets the sync token, saving it for later retrieval
      * @param {string} token The token to save
@@ -31,7 +32,7 @@ export interface IStorageProvider {
      * @returns {IFilterInfo|Promise<IFilterInfo>} The last saved filter, or null.
      * This can also be a promise for the filter.
      */
-    getFilter(): IFilterInfo | Promise<IFilterInfo>;
+    getFilter(): IFilterInfo | null | Promise<IFilterInfo|null>;
 
     /**
      * Store a simple string value into the provided key.

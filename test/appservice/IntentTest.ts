@@ -10,7 +10,7 @@ import {
 import * as expect from "expect";
 import * as simple from "simple-mock";
 import * as MockHttpBackend from 'matrix-mock-request';
-import { expectArrayEquals } from "../TestUtils";
+import { expectArrayEquals } from "../TestUtils.ts";
 
 describe('Intent', () => {
     it('should prepare the underlying client for a bot user', async () => {

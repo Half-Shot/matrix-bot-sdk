@@ -1,5 +1,5 @@
 import * as expect from "expect";
-import { createMinimalEvent } from "./EventTest";
+import { createMinimalEvent } from "./EventTest.ts";
 import { MembershipEvent } from "../../../src/models/events/MembershipEvent";
 
 describe("MembershipEvent", () => {

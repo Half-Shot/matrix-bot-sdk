@@ -1,7 +1,7 @@
 import * as expect from "expect";
-import { MatrixAuth } from "../src";
+import { MatrixAuth } from "../src.ts";
 import * as MockHttpBackend from 'matrix-mock-request';
-import { createTestClient } from "./MatrixClientTest";
+import { createTestClient } from "./MatrixClientTest.ts";
 
 export function createTestAuth(): { auth: MatrixAuth, http: MockHttpBackend, hsUrl: string } {
     const result = createTestClient();

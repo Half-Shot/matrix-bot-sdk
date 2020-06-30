@@ -1,6 +1,6 @@
-import { IJoinRoomStrategy } from "./JoinRoomStrategy";
-import { LogService } from "..";
-import { Appservice } from "../appservice/Appservice";
+import { IJoinRoomStrategy } from "./JoinRoomStrategy.ts";
+import { LogService } from "../index.ts";
+import { Appservice } from "../appservice/Appservice.ts";
 
 /**
  * A join strategy for application services that proxies joins to an underlying join

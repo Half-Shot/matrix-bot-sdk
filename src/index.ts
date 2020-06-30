@@ -1,77 +1,77 @@
 // Appservices
-export * from "./appservice/Appservice";
-export * from "./appservice/Intent";
-export * from "./appservice/MatrixBridge";
-export * from "./appservice/http_responses";
+export * from "./appservice/Appservice.ts";
+export * from "./appservice/Intent.ts";
+export * from "./appservice/MatrixBridge.ts";
+export * from "./appservice/http_responses.ts";
 
 // Helpers
-export * from "./helpers/RichReply";
-export * from "./helpers/MentionPill";
-export * from "./helpers/Permalinks";
-export * from "./helpers/MatrixGlob";
-export * from "./helpers/ProfileCache";
-export * from "./helpers/MatrixEntity";
+export * from "./helpers/RichReply.ts";
+export * from "./helpers/MentionPill.ts";
+export * from "./helpers/Permalinks.ts";
+// export * from "./helpers/MatrixGlob.ts";
+export * from "./helpers/ProfileCache.ts";
+export * from "./helpers/MatrixEntity.ts";
 
 // Logging
-export * from "./logging/ConsoleLogger";
-export * from "./logging/RichConsoleLogger";
-export * from "./logging/ILogger";
-export * from "./logging/LogService";
+export * from "./logging/ConsoleLogger.ts";
+export * from "./logging/RichConsoleLogger.ts";
+export * from "./logging/ILogger.ts";
+export * from "./logging/LogService.ts";
 
 // Metrics
-export * from "./metrics/contexts";
-export * from "./metrics/names";
-export * from "./metrics/decorators";
-export * from "./metrics/IMetricListener";
-export * from "./metrics/Metrics";
+export * from "./metrics/contexts.ts";
+export * from "./metrics/names.ts";
+export * from "./metrics/decorators.ts";
+export * from "./metrics/IMetricListener.ts";
+export * from "./metrics/Metrics.ts";
 
 // Mixins
-export * from "./mixins/AutojoinRoomsMixin";
-export * from "./mixins/AutojoinUpgradedRoomsMixin";
+export * from "./mixins/AutojoinRoomsMixin.ts";
+export * from "./mixins/AutojoinUpgradedRoomsMixin.ts";
 
 // Models
-export * from "./models/Presence";
-export * from "./models/MatrixProfile";
+export * from "./models/Presence.ts";
+export * from "./models/MatrixProfile.ts";
 
 // Event models
-export * from "./models/events/converter";
-export * from "./models/events/InvalidEventError";
-export * from "./models/events/Event";
-export * from "./models/events/RoomEvent";
-export * from "./models/events/PresenceEvent";
-export * from "./models/events/MembershipEvent";
-export * from "./models/events/MessageEvent";
-export * from "./models/events/AliasesEvent";
-export * from "./models/events/CanonicalAliasEvent";
-export * from "./models/events/CreateEvent";
-export * from "./models/events/JoinRulesEvent";
-export * from "./models/events/PowerLevelsEvent";
-export * from "./models/events/RedactionEvent";
-export * from "./models/events/PinnedEventsEvent";
-export * from "./models/events/RoomAvatarEvent";
-export * from "./models/events/RoomNameEvent";
-export * from "./models/events/RoomTopicEvent";
+export * from "./models/events/converter.ts";
+export * from "./models/events/InvalidEventError.ts";
+export * from "./models/events/Event.ts";
+export * from "./models/events/RoomEvent.ts";
+export * from "./models/events/PresenceEvent.ts";
+export * from "./models/events/MembershipEvent.ts";
+export * from "./models/events/MessageEvent.ts";
+export * from "./models/events/AliasesEvent.ts";
+export * from "./models/events/CanonicalAliasEvent.ts";
+export * from "./models/events/CreateEvent.ts";
+export * from "./models/events/JoinRulesEvent.ts";
+export * from "./models/events/PowerLevelsEvent.ts";
+export * from "./models/events/RedactionEvent.ts";
+export * from "./models/events/PinnedEventsEvent.ts";
+export * from "./models/events/RoomAvatarEvent.ts";
+export * from "./models/events/RoomNameEvent.ts";
+export * from "./models/events/RoomTopicEvent.ts";
 
 // Preprocessors
-export * from "./preprocessors/IPreprocessor";
-export * from "./preprocessors/RichRepliesPreprocessor";
+export * from "./preprocessors/IPreprocessor.ts";
+export * from "./preprocessors/RichRepliesPreprocessor.ts";
 
 // Storage stuff
-export * from "./storage/IAppserviceStorageProvider";
-export * from "./storage/IStorageProvider";
-export * from "./storage/MemoryStorageProvider";
-export * from "./storage/SimpleFsStorageProvider";
+export * from "./storage/IAppserviceStorageProvider.ts";
+export * from "./storage/IStorageProvider.ts";
+export * from "./storage/MemoryStorageProvider.ts";
+export * from "./storage/SimpleFsStorageProvider.ts";
 
 // Strategies
-export * from "./strategies/AppserviceJoinRoomStrategy";
-export * from "./strategies/JoinRoomStrategy";
+export * from "./strategies/AppserviceJoinRoomStrategy.ts";
+export * from "./strategies/JoinRoomStrategy.ts";
 
 // Root-level stuff
-export * from "./IFilter";
-export * from "./MatrixClient";
-export * from "./MatrixAuth";
-export * from "./UnstableApis";
-export * from "./AdminApis";
-export * from "./request";
-export * from "./PantalaimonClient";
-export * from "./SynchronousMatrixClient";
+export * from "./IFilter.ts";
+export * from "./MatrixClient.ts";
+export * from "./MatrixAuth.ts";
+export * from "./UnstableApis.ts";
+export * from "./AdminApis.ts";
+export * from "./request.ts";
+export * from "./PantalaimonClient.ts";
+export * from "./SynchronousMatrixClient.ts";

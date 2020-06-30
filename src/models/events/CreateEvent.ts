@@ -1,4 +1,4 @@
-import { StateEvent } from "./RoomEvent";
+import { StateEvent } from "./RoomEvent.ts";
 
 /**
  * Information about the previous room.

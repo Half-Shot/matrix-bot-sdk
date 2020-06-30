@@ -1,15 +1,14 @@
-import { IStorageProvider } from "./IStorageProvider";
-import { IFilterInfo } from "../IFilter";
-import { IAppserviceStorageProvider } from "./IAppserviceStorageProvider";
+import { IStorageProvider } from "./IStorageProvider.ts";
+import { IFilterInfo } from "../IFilter.ts";
+import { IAppserviceStorageProvider } from "./IAppserviceStorageProvider.ts";
 
 /**
  * A storage provider that persists no information by keeping it all in memory.
  * @category Storage providers
  */
 export class MemoryStorageProvider implements IStorageProvider, IAppserviceStorageProvider {
-
-    private syncToken: string;
-    private filter: IFilterInfo;
+    private syncToken: string|null = null;
+    private filter: IFilterInfo|null = null;
     private appserviceUsers: { [userId: string]: { registered: boolean } } = {};
     private appserviceTransactions: { [txnId: string]: boolean } = {};
     private kvStore: { [key: string]: string } = {};
@@ -26,7 +25,7 @@ export class MemoryStorageProvider implements IStorageProvider, IAppserviceStora
         this.filter = filter;
     }
 
-    getFilter(): IFilterInfo {
+    getFilter(): IFilterInfo|null {
         return this.filter;
     }
 

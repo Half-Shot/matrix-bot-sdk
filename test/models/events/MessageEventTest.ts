@@ -1,5 +1,5 @@
 import * as expect from "expect";
-import { createMinimalEvent } from "./EventTest";
+import { createMinimalEvent } from "./EventTest.ts";
 import { EventRedactedError, MessageEvent, MessageEventContent } from "../../../src";
 
 describe("MessageEvent", () => {

@@ -6,11 +6,11 @@ import {
     MatrixClient,
     MemoryStorageProvider,
     setRequestFn
-} from "../src";
+} from "../src.ts";
 import * as simple from "simple-mock";
 import * as MockHttpBackend from 'matrix-mock-request';
-import { expectArrayEquals } from "./TestUtils";
-import { Membership } from "../src/models/events/MembershipEvent";
+import { expectArrayEquals } from "./TestUtils.ts";
+import { Membership } from "../src/models/events/MembershipEvent.ts";
 
 export function createTestClient(storage: IStorageProvider = null): { client: MatrixClient, http: MockHttpBackend, hsUrl: string, accessToken: string } {
     const http = new MockHttpBackend();

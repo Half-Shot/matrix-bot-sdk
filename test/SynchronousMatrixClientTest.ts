@@ -1,5 +1,5 @@
 import * as expect from "expect";
-import { IStorageProvider, MatrixClient, setRequestFn, SynchronousMatrixClient } from "../src";
+import { IStorageProvider, MatrixClient, setRequestFn, SynchronousMatrixClient } from "../src.ts";
 import * as simple from "simple-mock";
 import * as MockHttpBackend from 'matrix-mock-request';
 

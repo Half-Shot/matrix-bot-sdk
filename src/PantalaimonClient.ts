@@ -15,9 +15,9 @@
  *     const client = await pantalaimon.createClientWithCredentials("username", "password");
  * </code>
  */
-import { IStorageProvider } from "./storage/IStorageProvider";
-import { MatrixClient } from "./MatrixClient";
-import { MatrixAuth } from "./MatrixAuth";
+import { IStorageProvider } from "./storage/IStorageProvider.ts";
+import { MatrixClient } from "./MatrixClient.ts";
+import { MatrixAuth } from "./MatrixAuth.ts";
 
 const ACCESS_TOKEN_STORAGE_KEY = "pantalaimon_access_token";
 

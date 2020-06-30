@@ -1,4 +1,4 @@
-import { StateEvent } from "./RoomEvent";
+import { StateEvent } from "./RoomEvent.ts";
 
 /**
  * The types of join rules that are valid in Matrix.

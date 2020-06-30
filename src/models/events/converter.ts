@@ -1,5 +1,5 @@
-import { MembershipEvent } from "./MembershipEvent";
-import { RoomEvent, StateEvent } from "./RoomEvent";
+import { MembershipEvent } from "./MembershipEvent.ts";
+import { RoomEvent, StateEvent } from "./RoomEvent.ts";
 import {
     AudioMessageEventContent,
     ImageMessageEventContent,
@@ -8,7 +8,7 @@ import {
     MessageEventContent,
     TextualMessageEventContent,
     VideoMessageEventContent
-} from "./MessageEvent";
+} from "./MessageEvent.ts";
 
 /**
  * Wraps a room event into a more suitable container.
@@ -16,7 +16,7 @@ import {
  * @returns {RoomEvent<any>} An instance of the most suitable container for the event.
  * @category Matrix events
  */
-export function wrapRoomEvent(event: any): RoomEvent<any> {
+export function wrapRoomEvent(event: any): RoomEvent<any>|null {
     if (!event) return null;
 
     if (typeof(event['state_key']) === 'string') {

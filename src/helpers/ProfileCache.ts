@@ -1,7 +1,7 @@
-import * as LRU from "lru-cache";
-import { LogService, MatrixClient, MatrixProfile } from "..";
-import { MembershipEvent } from "../models/events/MembershipEvent";
-import { Appservice } from "../appservice/Appservice";
+import { Cobalt } from "https://deno.land/x/cobalt/mod.ts";
+import { LogService, MatrixClient, MatrixProfile } from "../index.ts";
+import { MembershipEvent } from "../models/events/MembershipEvent.ts";
+import { Appservice } from "../appservice/Appservice.ts";
 
 /**
  * Functions for avoiding calls to profile endpoints. Useful for bots when
@@ -11,7 +11,7 @@ import { Appservice } from "../appservice/Appservice";
  */
 export class ProfileCache {
 
-    private cache: LRU;
+    private cache: Cobalt;
 
     /**
      * Creates a new profile cache.
@@ -20,9 +20,10 @@ export class ProfileCache {
      * @param {MatrixClient} client The client to use to get profile updates.
      */
     constructor(maxEntries: number, maxAgeMs: number, private client: MatrixClient) {
-        this.cache = new LRU({
-            max: maxEntries,
-            maxAge: maxAgeMs,
+        this.cache = new Cobalt({
+            capacity: maxEntries,
+            allowStale: true,
+            maxAge: maxAgeMs / 1000,
         });
     }
 

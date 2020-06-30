@@ -1,7 +1,7 @@
 import * as expect from "expect";
-import { AdminApis, IStorageProvider, MatrixClient, WhoisInfo } from "../src";
+import { AdminApis, IStorageProvider, MatrixClient, WhoisInfo } from "../src.ts";
 import * as MockHttpBackend from 'matrix-mock-request';
-import { createTestClient } from "./MatrixClientTest";
+import { createTestClient } from "./MatrixClientTest.ts";
 
 export function createTestAdminClient(storage: IStorageProvider = null): { client: AdminApis, mxClient: MatrixClient, http: MockHttpBackend, hsUrl: string, accessToken: string } {
     const result = createTestClient(storage);

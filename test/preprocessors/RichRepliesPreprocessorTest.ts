@@ -1,7 +1,7 @@
 import { RichRepliesPreprocessor } from "../../src";
 import * as expect from "expect";
 import * as simple from "simple-mock";
-import { createTestClient } from "../MatrixClientTest";
+import { createTestClient } from "../MatrixClientTest.ts";
 
 describe('RichRepliesPreprocessor', () => {
     it('should parse single-line events', async () => {

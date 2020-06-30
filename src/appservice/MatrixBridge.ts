@@ -1,5 +1,5 @@
-import { Appservice } from "./Appservice";
-import { Intent } from "./Intent";
+import { Appservice } from "./Appservice.ts";
+import { Intent } from "./Intent.ts";
 
 export const REMOTE_USER_INFO_ACCOUNT_DATA_EVENT_TYPE = "io.t2bot.sdk.bot.remote_user_info";
 export const REMOTE_ROOM_INFO_ACCOUNT_DATA_EVENT_TYPE = "io.t2bot.sdk.bot.remote_room_info";

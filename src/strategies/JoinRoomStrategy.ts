@@ -1,4 +1,4 @@
-import { LogService } from "..";
+import { LogService } from "../index.ts";
 
 export interface IJoinRoomStrategy {
     joinRoom(roomIdOrAlias: string, userId: string, apiCall: (roomIdOrAlias: string) => Promise<string>): Promise<string>;

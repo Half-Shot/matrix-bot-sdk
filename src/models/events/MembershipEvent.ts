@@ -1,5 +1,5 @@
-import { StateEvent } from "./RoomEvent";
-import { InvalidEventError } from "./InvalidEventError";
+import { StateEvent } from "./RoomEvent.ts";
+import { InvalidEventError } from "./InvalidEventError.ts";
 
 /**
  * The types of membership that are valid in Matrix.

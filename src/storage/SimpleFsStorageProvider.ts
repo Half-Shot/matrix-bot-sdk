@@ -1,20 +1,16 @@
-import { IStorageProvider } from "./IStorageProvider";
-import { IFilterInfo } from "../IFilter";
-import * as lowdb from "lowdb";
-import * as FileSync from "lowdb/adapters/FileSync";
-import { IAppserviceStorageProvider } from "./IAppserviceStorageProvider";
-import * as sha512 from "hash.js/lib/hash/sha/512";
-import * as mkdirp from "mkdirp";
-import * as path from "path";
-
+import { IStorageProvider } from "./IStorageProvider.ts";
+import { IFilterInfo } from "../IFilter.ts";
+import { CasualDB } from "https://deno.land/x/casualdb@0.1.1/mod.ts";
+import { IAppserviceStorageProvider } from "./IAppserviceStorageProvider.ts";
+import { sha512 } from "https://denopkg.com/chiefbiiko/sha512/mod.ts";
 /**
  * A storage provider that uses the disk to store information.
  * @category Storage providers
  */
 export class SimpleFsStorageProvider implements IStorageProvider, IAppserviceStorageProvider {
 
-    private db: any;
-    private completedTransactions = [];
+    private db: CasualDB<any>;
+    private completedTransactions: string[] = [];
 
     /**
      * Creates a new simple file system storage provider.
@@ -22,19 +18,20 @@ export class SimpleFsStorageProvider implements IStorageProvider, IAppserviceSto
      * @param {boolean} trackTransactionsInMemory True (default) to track all received appservice transactions rather than on disk.
      * @param {int} maxInMemoryTransactions The maximum number of transactions to hold in memory before rotating the oldest out. Defaults to 20.
      */
-    constructor(filename: string, private trackTransactionsInMemory = true, private maxInMemoryTransactions = 20) {
-        mkdirp.sync(path.dirname(filename));
+    constructor(private filename: string, private trackTransactionsInMemory = true, private maxInMemoryTransactions = 20) {
+        // mkdirp.sync(path.dirname(filename));
+        this.db = new CasualDB<any>();
+    }
 
-        const adapter = new FileSync(filename);
-        this.db = lowdb(adapter);
-
-        this.db.defaults({
+    async connect() {
+        await this.db.connect(this.filename);
+        await this.db.seed({
             syncToken: null,
             filter: null,
             appserviceUsers: {}, // userIdHash => { data }
             appserviceTransactions: {}, // txnIdHash => { data }
             kvStore: {}, // key => value (str)
-        }).write();
+        });
     }
 
     setSyncToken(token: string | null): void {
@@ -54,7 +51,7 @@ export class SimpleFsStorageProvider implements IStorageProvider, IAppserviceSto
     }
 
     addRegisteredUser(userId: string) {
-        const key = sha512().update(userId).digest('hex');
+        const key = sha512(userId, "utf8", "hex");
         this.db
             .set(`appserviceUsers.${key}.userId`, userId)
             .set(`appserviceUsers.${key}.registered`, true)
@@ -62,7 +59,7 @@ export class SimpleFsStorageProvider implements IStorageProvider, IAppserviceSto
     }
 
     isUserRegistered(userId: string): boolean {
-        const key = sha512().update(userId).digest('hex');
+        const key = sha512(userId, "utf8", "hex");
         return this.db.get(`appserviceUsers.${key}.registered`).value();
     }
 
@@ -71,7 +68,7 @@ export class SimpleFsStorageProvider implements IStorageProvider, IAppserviceSto
             return this.completedTransactions.indexOf(transactionId) !== -1;
         }
 
-        const key = sha512().update(transactionId).digest('hex');
+        const key = sha512(transactionId, "utf8", "hex");
         return this.db.get(`appserviceTransactions.${key}.completed`).value();
     }
 
@@ -86,7 +83,7 @@ export class SimpleFsStorageProvider implements IStorageProvider, IAppserviceSto
             return;
         }
 
-        const key = sha512().update(transactionId).digest('hex');
+        const key = sha512(transactionId, "utf8", "hex");
         this.db
             .set(`appserviceTransactions.${key}.txnId`, transactionId)
             .set(`appserviceTransactions.${key}.completed`, true)

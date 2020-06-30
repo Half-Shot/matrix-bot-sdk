@@ -1,4 +1,4 @@
-import { RoomEvent, RoomEventContent, StateEvent } from "./events/RoomEvent";
+import { RoomEvent, RoomEventContent, StateEvent } from "./events/RoomEvent.ts";
 
 export interface EventContext {
     /**

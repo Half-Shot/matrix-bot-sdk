@@ -1,20 +1,22 @@
-import { EventEmitter } from "events";
-import { IStorageProvider } from "./storage/IStorageProvider";
-import { MemoryStorageProvider } from "./storage/MemoryStorageProvider";
-import { IJoinRoomStrategy } from "./strategies/JoinRoomStrategy";
-import { UnstableApis } from "./UnstableApis";
-import { IPreprocessor } from "./preprocessors/IPreprocessor";
-import { getRequestFn } from "./request";
-import { LogLevel, LogService } from "./logging/LogService";
-import { htmlEncode } from "htmlencode";
-import { RichReply } from "./helpers/RichReply";
-import { Metrics } from "./metrics/Metrics";
-import { timedMatrixClientFunctionCall } from "./metrics/decorators";
-import { AdminApis } from "./AdminApis";
-import { Presence } from "./models/Presence";
-import { Membership, MembershipEvent } from "./models/events/MembershipEvent";
-import { RoomEvent, RoomEventContent, StateEvent } from "./models/events/RoomEvent";
-import { EventContext } from "./models/EventContext";
+import { IStorageProvider } from "./storage/IStorageProvider.ts";
+import { MemoryStorageProvider } from "./storage/MemoryStorageProvider.ts";
+import { IJoinRoomStrategy } from "./strategies/JoinRoomStrategy.ts";
+import { UnstableApis } from "./UnstableApis.ts";
+import { IPreprocessor } from "./preprocessors/IPreprocessor.ts";
+import { getRequestFn } from "./request.ts";
+import { LogLevel, LogService } from "./logging/LogService.ts";
+import { RichReply } from "./helpers/RichReply.ts";
+import { Metrics } from "./metrics/Metrics.ts";
+import { timedMatrixClientFunctionCall } from "./metrics/decorators.ts";
+import { AdminApis } from "./AdminApis.ts";
+import { Presence } from "./models/Presence.ts";
+import { Membership, MembershipEvent } from "./models/events/MembershipEvent.ts";
+import { RoomEvent, RoomEventContent, StateEvent } from "./models/events/RoomEvent.ts";
+import { EventContext } from "./models/EventContext.ts";
+import { encodeHTML } from "https://raw.githubusercontent.com/DenoBRComunitty/entities/master/mod.ts";
+import { createRequire } from "https://deno.land/std/node/module.ts";
+const require = createRequire(import.meta.url);
+const { EventEmitter } = require("events");
 
 /**
  * A client that is capable of interacting with a matrix homeserver.
@@ -892,7 +894,7 @@ export class MatrixClient extends EventEmitter {
      */
     @timedMatrixClientFunctionCall()
     public replyText(roomId: string, event: any, text: string, html: string = null): Promise<string> {
-        if (!html) html = htmlEncode(text);
+        if (!html) html = encodeHTML(text);
 
         const reply = RichReply.createFor(roomId, event, text, html);
         return this.sendMessage(roomId, reply);

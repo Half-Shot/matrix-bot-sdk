@@ -1,5 +1,5 @@
-import { StateEvent } from "./RoomEvent";
-import { DimensionalFileInfo } from "./MessageEvent";
+import { StateEvent } from "./RoomEvent.ts";
+import { DimensionalFileInfo } from "./MessageEvent.ts";
 
 /**
  * The content definition for m.room.avatar events

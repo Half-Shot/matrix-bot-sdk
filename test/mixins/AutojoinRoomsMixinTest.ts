@@ -1,7 +1,7 @@
 import { Appservice, AutojoinRoomsMixin, Intent } from "../../src";
 import * as expect from "expect";
 import * as simple from "simple-mock";
-import { createTestClient } from "../MatrixClientTest";
+import { createTestClient } from "../MatrixClientTest.ts";
 
 describe('AutojoinRoomsMixin', () => {
     it('should join rooms for regular invites', () => {

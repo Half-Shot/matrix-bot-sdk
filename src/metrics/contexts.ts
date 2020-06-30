@@ -2,8 +2,8 @@
  * Default context for all metrics.
  * @category Metrics
  */
-import { MatrixClient } from "../MatrixClient";
-import { Intent } from "../appservice/Intent";
+import { MatrixClient } from "../MatrixClient.ts";
+import { Intent } from "../appservice/Intent.ts";
 
 export interface IMetricContext {
     /**

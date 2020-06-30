@@ -1,4 +1,4 @@
-import { MentionPill, UserID } from "..";
+import { MentionPill, UserID } from "../index.ts";
 
 /**
  * Profile information commonly associated with Matrix profiles
@@ -42,7 +42,7 @@ export class MatrixProfile {
      * The avatar URL for the user. If the user does not have an avatar, this will
      * be null.
      */
-    public get avatarUrl(): string {
+    public get avatarUrl(): string|null {
         return this.profile.avatar_url || null; // enforce null over boolean semantics
     }
 

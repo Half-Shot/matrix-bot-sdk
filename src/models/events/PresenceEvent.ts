@@ -1,4 +1,4 @@
-import { MatrixEvent } from "./Event";
+import { MatrixEvent } from "./Event.ts";
 
 /**
  * The allowed states of presence in Matrix

@@ -1,4 +1,4 @@
-import { MatrixClient } from "./MatrixClient";
+import { MatrixClient } from "./MatrixClient.ts";
 
 /**
  * Whois information about a user.

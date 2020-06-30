@@ -1,4 +1,4 @@
-import { StateEvent } from "./RoomEvent";
+import { StateEvent } from "./RoomEvent.ts";
 
 /**
  * The content definition for m.room.pinned_events events

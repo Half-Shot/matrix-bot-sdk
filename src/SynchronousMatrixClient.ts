@@ -1,4 +1,4 @@
-import { MatrixClient } from "./MatrixClient";
+import { MatrixClient } from "./MatrixClient.ts";
 
 /**
  * A MatrixClient class that handles events in sync for the /sync loop, instead

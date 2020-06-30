@@ -1,4 +1,4 @@
-import * as sanitizeHtml from "sanitize-html";
+// import * as sanitizeHtml from "sanitize-html";
 
 /**
  * Helper for creating rich replies.
@@ -21,7 +21,8 @@ export class RichReply {
         const originalBody = (event["content"] ? event["content"]["body"] : "") || "";
         let originalHtml = (event["content"] ? event["content"]["formatted_body"] : "") || null;
         if (originalHtml === null) {
-            originalHtml = sanitizeHtml(originalBody);
+            // WARN: NOT running sanitizeHtml
+            originalHtml = originalBody; // sanitizeHtml(originalBody);
         }
 
         const fallbackText = "> <" + event["sender"] + "> " + originalBody.split("\n").join("\n> ");

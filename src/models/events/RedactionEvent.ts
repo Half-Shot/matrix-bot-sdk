@@ -1,4 +1,4 @@
-import { RoomEvent } from "./RoomEvent";
+import { RoomEvent } from "./RoomEvent.ts";
 
 /**
  * The content definition for m.room.redaction events

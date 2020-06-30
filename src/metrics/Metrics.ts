@@ -1,6 +1,6 @@
-import { IMetricListener } from "./IMetricListener";
-import { IMetricContext } from "./contexts";
-import { Intent, LogService, MatrixClient } from "..";
+import { IMetricListener } from "./IMetricListener.ts";
+import { IMetricContext } from "./contexts.ts";
+import { Intent, LogService, MatrixClient } from "../index.ts";
 
 /**
  * Tracks metrics.

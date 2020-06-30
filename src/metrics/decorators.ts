@@ -5,8 +5,8 @@ import {
     METRIC_MATRIX_CLIENT_FAILED_FUNCTION_CALL,
     METRIC_MATRIX_CLIENT_FUNCTION_CALL,
     METRIC_MATRIX_CLIENT_SUCCESSFUL_FUNCTION_CALL
-} from "./names";
-import { IntentCallContext, MatrixClientCallContext } from "./contexts";
+} from "./names.ts";
+import { IntentCallContext, MatrixClientCallContext } from "./contexts.ts";
 
 /**
  * Times a MatrixClient function call for metrics.

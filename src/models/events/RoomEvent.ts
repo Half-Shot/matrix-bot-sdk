@@ -1,4 +1,4 @@
-import { MatrixEvent } from "./Event";
+import { MatrixEvent } from "./Event.ts";
 
 /**
  * The typical unsigned data found on an event.

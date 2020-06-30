@@ -1,5 +1,5 @@
-import { MatrixClient } from "../MatrixClient";
-import { Appservice } from "../appservice/Appservice";
+import { MatrixClient } from "../MatrixClient.ts";
+import { Appservice } from "../appservice/Appservice.ts";
 
 /**
  * Automatically accepts invites for rooms

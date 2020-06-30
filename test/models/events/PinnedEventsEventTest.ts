@@ -1,4 +1,4 @@
-import { createMinimalEvent } from "./EventTest";
+import { createMinimalEvent } from "./EventTest.ts";
 import { expectArrayEquals } from "../../TestUtils";
 import { PinnedEventsEvent } from "../../../src";
 

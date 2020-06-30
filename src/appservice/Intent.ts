@@ -1,8 +1,8 @@
-import { IAppserviceStorageProvider, LogService, MatrixClient, Metrics } from "..";
-import { Appservice, IAppserviceOptions } from "./Appservice";
+import { IAppserviceStorageProvider, LogService, MatrixClient, Metrics } from "../index.ts";
+import { Appservice, IAppserviceOptions } from "./Appservice.ts";
 
 // noinspection TypeScriptPreferShortImport
-import { timedIntentFunctionCall } from "../metrics/decorators";
+import { timedIntentFunctionCall } from "../metrics/decorators.ts";
 
 /**
  * An Intent is an intelligent client that tracks things like the user's membership

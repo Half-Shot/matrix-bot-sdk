@@ -1,6 +1,6 @@
-import { MatrixClient } from "../MatrixClient";
-import { Permalinks } from "./Permalinks";
-import { LogService } from "..";
+import { MatrixClient } from "../MatrixClient.ts";
+import { Permalinks } from "./Permalinks.ts";
+import { LogService } from "../index.ts";
 
 /**
  * Represents a system for generating a mention pill for an entity.

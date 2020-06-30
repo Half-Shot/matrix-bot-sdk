@@ -5,7 +5,7 @@ import {
     IAppserviceRegistration,
     MemoryStorageProvider,
     SimpleRetryJoinStrategy
-} from "../src";
+} from "../src/index.ts";
 
 const registration: IAppserviceRegistration = {
     as_token: "change_me",
@@ -15,7 +15,7 @@ const registration: IAppserviceRegistration = {
         users: [{
             regex: "@_example_.*:localhost",
             exclusive: true,
-            groupId: null,
+            groupId: undefined,
         }],
         rooms: [],
         aliases: [],

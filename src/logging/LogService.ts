@@ -1,5 +1,5 @@
-import { ConsoleLogger } from "./ConsoleLogger";
-import { ILogger } from "./ILogger";
+import { ConsoleLogger } from "./ConsoleLogger.ts";
+import { ILogger } from "./ILogger.ts";
 
 /**
  * The log levels to log at.

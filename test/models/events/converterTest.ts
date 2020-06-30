@@ -7,7 +7,7 @@ import {
     wrapRoomEvent
 } from "../../../src";
 import * as expect from "expect";
-import { createMinimalEvent } from "./EventTest";
+import { createMinimalEvent } from "./EventTest.ts";
 import { expectInstanceOf } from "../../TestUtils";
 import { MembershipEvent } from "../../../src/models/events/MembershipEvent";
 
