@@ -1,6 +1,6 @@
 # DENO branch
 
-![deno dino](https://deno.land/images/deno_matrix.png)
+![deno dino](.//deno_matrix.png)
 
 *Yeah, [they have a Matrix Deno logo!](https://deno.land/artwork)*
 
