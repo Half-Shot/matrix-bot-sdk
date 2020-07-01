@@ -1,3 +1,17 @@
+# DENO branch
+
+![deno dino](https://deno.land/images/deno_matrix.png)
+
+*Yeah, [they have a Matrix Deno logo!](https://deno.land/artwork)*
+
+This branch includes changes to get the SDK working on [Deno](https://deno.land/). This
+is largely incompatible with the NodeJS codebase, as Deno has it's own module management
+system.
+
+Tests are also not expected to work until they have been ported to a deno compatible
+testing framework.
+
+
 # matrix-js-bot-sdk
 
 [![npm version](https://badge.fury.io/js/matrix-bot-sdk.svg)](https://www.npmjs.com/package/matrix-bot-sdk)
