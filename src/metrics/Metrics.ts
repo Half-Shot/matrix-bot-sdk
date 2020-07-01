@@ -18,7 +18,7 @@ export class Metrics {
      * upwards to the parent.
      * @param {Metrics} parent Optional parent for upstream metrics.
      */
-    constructor(parent: Metrics = null) {
+    constructor(parent: Metrics|null = null) {
         if (parent !== null) {
             this.registerListener({
                 onIncrement(metricName: string, context: IMetricContext, amount: number) {

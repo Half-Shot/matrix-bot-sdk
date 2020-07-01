@@ -11,8 +11,8 @@ export class RichConsoleLogger implements ILogger {
     protected chalkInfo = clc.green.text;
     protected chalkWarning = clc.yellow.text;
     protected chalkError = clc.bright.red.text;
-    protected chalkTimestamp = clc.grey.text;
-    protected chalkModule = clc.grey.text;
+    protected chalkTimestamp = clc.white.text;
+    protected chalkModule = clc.white.text;
 
     protected getTimestamp(): string {
         const now = new Date(Date.now()).toUTCString();

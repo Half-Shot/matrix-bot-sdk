@@ -34,45 +34,43 @@ export class SimpleFsStorageProvider implements IStorageProvider, IAppserviceSto
         });
     }
 
-    setSyncToken(token: string | null): void {
-        this.db.set('syncToken', token).write();
+    async setSyncToken(token: string | null) {
+        await this.db.write('syncToken', token);
     }
 
-    getSyncToken(): string | null {
-        return this.db.get('syncToken').value();
+    async getSyncToken(): Promise<string | null> {
+        return (await this.db.get<string>('syncToken')).value();
     }
 
-    setFilter(filter: IFilterInfo): void {
-        this.db.set('filter', filter).write();
+    async setFilter(filter: IFilterInfo) {
+        await this.db.write('filter', filter);
     }
 
-    getFilter(): IFilterInfo {
-        return this.db.get('filter').value();
+    async getFilter(): Promise<IFilterInfo> {
+        return (await this.db.get<IFilterInfo>('filter')).value();
     }
 
-    addRegisteredUser(userId: string) {
+    async addRegisteredUser(userId: string) {
         const key = sha512(userId, "utf8", "hex");
-        this.db
-            .set(`appserviceUsers.${key}.userId`, userId)
-            .set(`appserviceUsers.${key}.registered`, true)
-            .write();
+        await this.db.write(`appserviceUsers.${key}.userId`, userId);
+        await this.db.write(`appserviceUsers.${key}.registered`, true);
     }
 
-    isUserRegistered(userId: string): boolean {
+    async isUserRegistered(userId: string): Promise<boolean> {
         const key = sha512(userId, "utf8", "hex");
-        return this.db.get(`appserviceUsers.${key}.registered`).value();
+        return (await this.db.get<boolean>(`appserviceUsers.${key}.registered`)).value();
     }
 
-    isTransactionCompleted(transactionId: string): boolean {
+    async isTransactionCompleted(transactionId: string): Promise<boolean> {
         if (this.trackTransactionsInMemory) {
             return this.completedTransactions.indexOf(transactionId) !== -1;
         }
 
         const key = sha512(transactionId, "utf8", "hex");
-        return this.db.get(`appserviceTransactions.${key}.completed`).value();
+        return (await this.db.get<boolean>(`appserviceUsers.${key}.completed`)).value();
     }
 
-    setTransactionCompleted(transactionId: string) {
+    async setTransactionCompleted(transactionId: string) {
         if (this.trackTransactionsInMemory) {
             if (this.completedTransactions.indexOf(transactionId) === -1) {
                 this.completedTransactions.push(transactionId);
@@ -84,19 +82,17 @@ export class SimpleFsStorageProvider implements IStorageProvider, IAppserviceSto
         }
 
         const key = sha512(transactionId, "utf8", "hex");
-        this.db
-            .set(`appserviceTransactions.${key}.txnId`, transactionId)
-            .set(`appserviceTransactions.${key}.completed`, true)
-            .write();
+        await this.db.write(`appserviceTransactions.${key}.txnId`, transactionId)
+        await this.db.write(`appserviceTransactions.${key}.completed`, true);
     }
 
-    readValue(key: string): string | null | undefined {
-        return this.db.get("kvStore").value()[key];
+    async readValue(key: string): Promise<string | null | undefined> {
+        return (await this.db.get<{[key: string]: string | null | undefined}>("kvStore")).value()[key];
     }
 
-    storeValue(key: string, value: string): void {
-        const kvStore = this.db.get("kvStore").value();
+    async storeValue(key: string, value: string) {
+        const kvStore = (await this.db.get<{[key: string]: string | null | undefined}>("kvStore")).value();
         kvStore[key] = value;
-        this.db.set("kvStore", kvStore).write();
+        await this.db.write("kvStore", kvStore);
     }
 }
