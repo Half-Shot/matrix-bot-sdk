@@ -1,28 +1,55 @@
 import * as expect from "expect";
 import {
+    DeviceKeyAlgorithm,
+    DeviceKeyLabel,
+    EncryptionAlgorithm,
     EventKind,
     IJoinRoomStrategy,
     IPreprocessor,
     IStorageProvider,
     MatrixClient,
+    Membership,
     MemoryStorageProvider,
+    OpenIDConnectToken,
+    OTKAlgorithm,
+    OTKCounts,
+    OTKs,
+    RoomDirectoryLookupResponse,
+    RoomEvent,
     setRequestFn,
-    Membership, OpenIDConnectToken,
 } from "../src";
 import * as simple from "simple-mock";
 import * as MockHttpBackend from 'matrix-mock-request';
-import { expectArrayEquals } from "./TestUtils";
+import { expectArrayEquals, feedOlmAccount, feedStaticOlmAccount } from "./TestUtils";
 import { redactObjectForLogging } from "../src/http";
+import { PowerLevelAction } from "../src/models/PowerLevelAction";
+import { SqliteCryptoStorageProvider } from "../src/storage/SqliteCryptoStorageProvider";
 
-export function createTestClient(storage: IStorageProvider = null, userId: string = null): { client: MatrixClient, http: MockHttpBackend, hsUrl: string, accessToken: string } {
+export const TEST_DEVICE_ID = "TEST_DEVICE";
+
+export function createTestClient(storage: IStorageProvider = null, userId: string = null, crypto = false): { client: MatrixClient, http: MockHttpBackend, hsUrl: string, accessToken: string } {
     const http = new MockHttpBackend();
     const hsUrl = "https://localhost";
     const accessToken = "s3cret";
-    const client = new MatrixClient(hsUrl, accessToken, storage);
+    const client = new MatrixClient(hsUrl, accessToken, storage, crypto ? new SqliteCryptoStorageProvider(":memory:") : null);
     (<any>client).userId = userId; // private member access
     setRequestFn(http.requestFn);
 
     return {http, hsUrl, accessToken, client};
+}
+
+export async function createPreparedCryptoTestClient(userId: string): Promise<{ client: MatrixClient, http: MockHttpBackend, hsUrl: string, accessToken: string }> {
+    const r = createTestClient(null, userId, true);
+
+    await r.client.cryptoStore.setDeviceId(TEST_DEVICE_ID);
+    await feedStaticOlmAccount(r.client);
+    r.client.uploadDeviceKeys = () => Promise.resolve({});
+    r.client.uploadDeviceOneTimeKeys = () => Promise.resolve({});
+    r.client.checkOneTimeKeyCounts = () => Promise.resolve({});
+
+    await r.client.crypto.prepare([]);
+
+    return r;
 }
 
 describe('MatrixClient', () => {
@@ -45,6 +72,22 @@ describe('MatrixClient', () => {
 
             expect(client.homeserverUrl).toEqual(homeserverUrl);
             expect(client.accessToken).toEqual(accessToken);
+        });
+
+        it('should create a crypto client when requested', () => {
+            const homeserverUrl = "https://example.org";
+            const accessToken = "example_token";
+
+            const client = new MatrixClient(homeserverUrl, accessToken, null, new SqliteCryptoStorageProvider(":memory:"));
+            expect(client.crypto).toBeDefined();
+        });
+
+        it('should NOT create a crypto client when requested', () => {
+            const homeserverUrl = "https://example.org";
+            const accessToken = "example_token";
+
+            const client = new MatrixClient(homeserverUrl, accessToken, null, null);
+            expect(client.crypto).toBeUndefined();
         });
     });
 
@@ -659,7 +702,7 @@ describe('MatrixClient', () => {
             const roomId = "!abc123:example.org";
             const alias = "#test:example.org";
 
-            const spy = simple.stub().returnWith(new Promise(((resolve, reject) => resolve({
+            const spy = simple.stub().returnWith(new Promise<RoomDirectoryLookupResponse>(((resolve, reject) => resolve({
                 roomId: roomId,
                 residentServers: []
             }))));
@@ -834,15 +877,30 @@ describe('MatrixClient', () => {
         });
 
         it('should request the user ID if it is not known', async () => {
-            const {client, http} = createTestClient();
+            const {client} = createTestClient();
 
             const userId = "@example:matrix.org";
+            client.getWhoAmI = () => Promise.resolve({user_id: userId});
 
-            http.when("GET", "/_matrix/client/r0/account/whoami").respond(200, {user_id: userId});
-
-            http.flushAllExpected();
             const result = await client.getUserId();
             expect(result).toEqual(userId);
+        });
+    });
+
+    describe('getWhoAmI', () => {
+        it('should call the right endpoint', async () => {
+            const {client, http} = createTestClient();
+
+            const response = {
+                user_id: "@user:example.org",
+                device_id: "DEVICE",
+            };
+
+            http.when("GET", "/_matrix/client/r0/account/whoami").respond(200, response);
+
+            http.flushAllExpected();
+            const result = await client.getWhoAmI();
+            expect(result).toMatchObject(response);
         });
     });
 
@@ -1005,7 +1063,7 @@ describe('MatrixClient', () => {
             const filterId = "abc12345";
             const secondToken = "second";
 
-            const waitPromise = new Promise(((resolve, reject) => {
+            const waitPromise = new Promise<void>(((resolve, reject) => {
                 simple.mock(storage, "getFilter").returnWith({id: filterId, filter: filter});
                 const setSyncTokenFn = simple.mock(storage, "setSyncToken").callFn(newToken => {
                     expect(newToken).toEqual(secondToken);
@@ -1045,7 +1103,7 @@ describe('MatrixClient', () => {
 
             simple.mock(storage, "getFilter").returnWith({id: filterId, filter: filter});
             const getSyncTokenFn = simple.mock(storage, "getSyncToken").returnWith(syncToken);
-            const waitPromise = new Promise(((resolve, reject) => {
+            const waitPromise = new Promise<void>(((resolve, reject) => {
                 simple.mock(storage, "setSyncToken").callFn(newToken => {
                     expect(newToken).toEqual(syncToken);
                     resolve();
@@ -2006,6 +2064,166 @@ describe('MatrixClient', () => {
             expect(messageSpy.callCount).toBe(1);
             expect(eventSpy.callCount).toBe(5);
         });
+
+        it('should handle to_device messages', async () => {
+            const { client } = createTestClient(null, "@user:example.org", true);
+            const syncClient = <ProcessSyncClient>(<any>client);
+
+            // Override to fix test as we aren't testing this here.
+            client.crypto.updateFallbackKey = async () => null;
+
+            const deviceMessage = {
+                type: "m.room.encrypted",
+                content: {
+                    hello: "world",
+                },
+            };
+            const wrongMessage = {
+                type: "not-m.room.encrypted",
+                content: {
+                    wrong: true,
+                },
+            };
+
+            await client.cryptoStore.setDeviceId(TEST_DEVICE_ID);
+            await feedStaticOlmAccount(client);
+            client.uploadDeviceKeys = () => Promise.resolve({});
+            client.uploadDeviceOneTimeKeys = () => Promise.resolve({});
+            client.checkOneTimeKeyCounts = () => Promise.resolve({});
+
+            await client.crypto.prepare([]);
+
+            const processSpy = simple.stub().callFn(async (message) => {
+                expect(message).toMatchObject(deviceMessage);
+            });
+            client.crypto.processInboundDeviceMessage = processSpy;
+
+            await syncClient.processSync({
+                to_device: {
+                    events: [wrongMessage, deviceMessage],
+                },
+            });
+            expect(processSpy.callCount).toBe(1);
+        });
+
+        it('should handle fallback key updates', async () => {
+            const { client } = createTestClient(null, "@user:example.org", true);
+            const syncClient = <ProcessSyncClient>(<any>client);
+
+            await client.cryptoStore.setDeviceId(TEST_DEVICE_ID);
+            await feedStaticOlmAccount(client);
+            client.uploadDeviceKeys = () => Promise.resolve({});
+            client.uploadDeviceOneTimeKeys = () => Promise.resolve({});
+            client.checkOneTimeKeyCounts = () => Promise.resolve({});
+
+            await client.crypto.prepare([]);
+
+            const updateSpy = simple.stub();
+            client.crypto.updateFallbackKey = updateSpy;
+
+            // Test workaround for https://github.com/matrix-org/synapse/issues/10618
+            await syncClient.processSync({
+                // no content
+            });
+            expect(updateSpy.callCount).toBe(1);
+            updateSpy.reset();
+
+            // Test "no more fallback keys" state
+            await syncClient.processSync({
+                "org.matrix.msc2732.device_unused_fallback_key_types": [],
+                "device_unused_fallback_key_types": [],
+            });
+            expect(updateSpy.callCount).toBe(1);
+            updateSpy.reset();
+
+            // Test "has remaining fallback keys"
+            await syncClient.processSync({
+                "org.matrix.msc2732.device_unused_fallback_key_types": ["signed_curve25519"],
+                "device_unused_fallback_key_types": ["signed_curve25519"],
+            });
+            expect(updateSpy.callCount).toBe(0);
+        });
+
+        it('should decrypt timeline events', async () => {
+            const {client: realClient} = await createPreparedCryptoTestClient("@alice:example.org");
+            const client = <ProcessSyncClient>(<any>realClient);
+
+            // Override to fix test as we aren't testing this here.
+            realClient.crypto.updateFallbackKey = async () => null;
+
+            const userId = "@syncing:example.org";
+            const roomId = "!testing:example.org";
+            const events = [
+                {
+                    type: "m.room.encrypted",
+                    content: {newType: "m.room.message"},
+                },
+                {
+                    type: "m.room.encrypted",
+                    content: {newType: "m.room.not_message"},
+                },
+            ];
+
+            realClient.crypto.isRoomEncrypted = async () => true; // for the purposes of this test
+
+            const decryptSpy = simple.stub().callFn(async (ev, rid) => {
+                expect(events).toContain(ev.raw);
+                expect(rid).toEqual(roomId);
+                return new RoomEvent({
+                    ...ev.raw,
+                    type: ev.content.newType,
+                });
+            });
+            realClient.crypto.decryptRoomEvent = decryptSpy;
+
+            const processSpy = simple.stub().callFn(async (ev) => {
+                if (ev['type'] === 'm.room.encrypted' && (processSpy.callCount%2 !== 0)) {
+                    expect(events).toContain(ev);
+                } else if (ev['type'] === 'm.room.message') {
+                    expect(ev.content).toMatchObject(events[0].content);
+                } else {
+                    expect(ev.content).toMatchObject(events[1].content);
+                }
+                return ev;
+            });
+            (<any>realClient).processEvent = processSpy;
+
+            client.userId = userId;
+
+            const encryptedSpy = simple.stub();
+            const decryptedSpy = simple.stub();
+            const failedSpy = simple.stub();
+            const messageSpy = simple.stub().callFn((rid, ev) => {
+                expect(rid).toEqual(roomId);
+                expect(ev["type"]).toEqual("m.room.message");
+                expect(ev.content).toMatchObject(events[0].content);
+            });
+            const eventSpy = simple.stub().callFn((rid, ev) => {
+                expect(rid).toEqual(roomId);
+
+                if (ev['type'] === 'm.room.message') {
+                    expect(ev.content).toMatchObject(events[0].content);
+                } else {
+                    expect(ev.content).toMatchObject(events[1].content);
+                }
+            });
+            realClient.on("room.encrypted_event", encryptedSpy);
+            realClient.on("room.decrypted_event", decryptedSpy);
+            realClient.on("room.failed_decryption", failedSpy);
+            realClient.on("room.message", messageSpy);
+            realClient.on("room.event", eventSpy);
+
+            const roomsObj = {};
+            roomsObj[roomId] = {timeline: {events: events}, invite_state: {events: events}};
+            await client.processSync({rooms: {join: roomsObj, leave: roomsObj, invite: roomsObj}});
+            expect(encryptedSpy.callCount).toBe(2);
+            expect(decryptedSpy.callCount).toBe(2);
+            expect(failedSpy.callCount).toBe(0);
+            expect(messageSpy.callCount).toBe(1);
+            expect(eventSpy.callCount).toBe(2);
+            expect(decryptSpy.callCount).toBe(2);
+            expect(processSpy.callCount).toBe(4); // 2 for encrypted, 2 for decrypted
+        });
     });
 
     describe('getEvent', () => {
@@ -2051,6 +2269,184 @@ describe('MatrixClient', () => {
             const result = await client.getEvent(roomId, eventId);
             expect(result).toMatchObject(event);
             expect(result["processed"]).toBeTruthy();
+        });
+
+        it('should try decryption', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!abc123:example.org";
+            const eventId = "$example:matrix.org";
+            const event = {type: "m.room.encrypted", content: {encrypted: true}};
+            const decrypted = {type: "m.room.message", content: {hello: "world"}};
+
+            const isEncSpy = simple.stub().callFn(async (rid) => {
+                expect(rid).toEqual(roomId);
+                return true;
+            });
+            client.crypto.isRoomEncrypted = isEncSpy;
+
+            const decryptSpy = simple.stub().callFn(async (ev, rid) => {
+                expect(ev.raw).toMatchObject(event);
+                expect(rid).toEqual(roomId);
+                return new RoomEvent(decrypted);
+            });
+            client.crypto.decryptRoomEvent = decryptSpy;
+
+            const processSpy = simple.stub().callFn(async (ev) => {
+                if (ev['type'] === 'm.room.encrypted' && (processSpy.callCount % 2 !== 0)) {
+                    expect(ev).toMatchObject(event);
+                } else {
+                    expect(ev).toMatchObject(decrypted);
+                }
+                return ev;
+            });
+            (<any>client).processEvent = processSpy;
+
+            http.when("GET", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                expect(path).toEqual(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`);
+                return event;
+            });
+
+            http.flushAllExpected();
+            const result = await client.getEvent(roomId, eventId);
+            expect(result).toMatchObject(decrypted);
+            expect(processSpy.callCount).toBe(2);
+            expect(isEncSpy.callCount).toBe(1);
+            expect(decryptSpy.callCount).toBe(1);
+        });
+
+        it('should not try decryption in unencrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!abc123:example.org";
+            const eventId = "$example:matrix.org";
+            const event = {type: "m.room.encrypted", content: {encrypted: true}};
+            const decrypted = {type: "m.room.message", content: {hello: "world"}};
+
+            const isEncSpy = simple.stub().callFn(async (rid) => {
+                expect(rid).toEqual(roomId);
+                return false;
+            });
+            client.crypto.isRoomEncrypted = isEncSpy;
+
+            const decryptSpy = simple.stub().callFn(async (ev, rid) => {
+                expect(ev.raw).toMatchObject(event);
+                expect(rid).toEqual(roomId);
+                return new RoomEvent(decrypted);
+            });
+            client.crypto.decryptRoomEvent = decryptSpy;
+
+            const processSpy = simple.stub().callFn(async (ev) => {
+                if (ev['type'] === 'm.room.encrypted' && (processSpy.callCount % 2 !== 0)) {
+                    expect(ev).toMatchObject(event);
+                } else {
+                    expect(ev).toMatchObject(decrypted);
+                }
+                return ev;
+            });
+            (<any>client).processEvent = processSpy;
+
+            http.when("GET", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                expect(path).toEqual(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`);
+                return event;
+            });
+
+            http.flushAllExpected();
+            const result = await client.getEvent(roomId, eventId);
+            expect(result).toMatchObject(event);
+            expect(processSpy.callCount).toBe(1);
+            expect(isEncSpy.callCount).toBe(1);
+            expect(decryptSpy.callCount).toBe(0);
+        });
+    });
+
+    describe('getRawEvent', () => {
+        it('should call the right endpoint', async () => {
+            const {client, http, hsUrl} = createTestClient();
+
+            const roomId = "!abc123:example.org";
+            const eventId = "$example:matrix.org";
+            const event = {type: "m.room.message"};
+
+            http.when("GET", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                expect(path).toEqual(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`);
+                return event;
+            });
+
+            http.flushAllExpected();
+            const result = await client.getRawEvent(roomId, eventId);
+            expect(result).toMatchObject(event);
+        });
+
+        it('should process events', async () => {
+            const {client, http, hsUrl} = createTestClient();
+
+            const roomId = "!abc123:example.org";
+            const eventId = "$example:matrix.org";
+            const event = {type: "m.room.message"};
+            const processor = <IPreprocessor>{
+                processEvent: (ev, procClient, kind?) => {
+                    expect(kind).toEqual(EventKind.RoomEvent);
+                    ev["processed"] = true;
+                },
+                getSupportedEventTypes: () => ["m.room.message"],
+            };
+
+            client.addPreprocessor(processor);
+
+            http.when("GET", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                expect(path).toEqual(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`);
+                return event;
+            });
+
+            http.flushAllExpected();
+            const result = await client.getRawEvent(roomId, eventId);
+            expect(result).toMatchObject(event);
+            expect(result["processed"]).toBeTruthy();
+        });
+
+        it('should not try decryption in any rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!abc123:example.org";
+            const eventId = "$example:matrix.org";
+            const event = {type: "m.room.encrypted", content: {encrypted: true}};
+            const decrypted = {type: "m.room.message", content: {hello: "world"}};
+
+            const isEncSpy = simple.stub().callFn(async (rid) => {
+                expect(rid).toEqual(roomId);
+                return false;
+            });
+            client.crypto.isRoomEncrypted = isEncSpy;
+
+            const decryptSpy = simple.stub().callFn(async (ev, rid) => {
+                expect(ev.raw).toMatchObject(event);
+                expect(rid).toEqual(roomId);
+                return new RoomEvent(decrypted);
+            });
+            client.crypto.decryptRoomEvent = decryptSpy;
+
+            const processSpy = simple.stub().callFn(async (ev) => {
+                if (ev['type'] === 'm.room.encrypted' && (processSpy.callCount % 2 !== 0)) {
+                    expect(ev).toMatchObject(event);
+                } else {
+                    expect(ev).toMatchObject(decrypted);
+                }
+                return ev;
+            });
+            (<any>client).processEvent = processSpy;
+
+            http.when("GET", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                expect(path).toEqual(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`);
+                return event;
+            });
+
+            http.flushAllExpected();
+            const result = await client.getRawEvent(roomId, eventId);
+            expect(result).toMatchObject(event);
+            expect(processSpy.callCount).toBe(1);
+            expect(isEncSpy.callCount).toBe(0);
+            expect(decryptSpy.callCount).toBe(0);
         });
     });
 
@@ -2516,10 +2912,10 @@ describe('MatrixClient', () => {
             const roomId = "!testing:example.org";
             const members = {
                 "@alice:example.org": {
-                    displayname: "Alice of Wonderland"
+                    display_name: "Alice of Wonderland"
                 },
                 "@bob:example.org": {
-                    displayname: "Bob the Builder",
+                    display_name: "Bob the Builder",
                     avatar_url: "mxc://foo/bar"
                 }
             };
@@ -2736,8 +3132,102 @@ describe('MatrixClient', () => {
                 msgtype: "m.text",
                 format: "org.matrix.custom.html",
                 body: `> <${originalEvent.sender}> ${originalEvent.content.body}\n\n${replyText}`,
-                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a><a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
+                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a> <a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
             };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.message/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(expectedContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.replyText(roomId, originalEvent, replyText, replyHtml);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should try to encrypt in encrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const originalEvent = {
+                content: {
+                    body: "*Hello World*",
+                    formatted_body: "<i>Hello World</i>",
+                },
+                sender: "@abc:example.org",
+                event_id: "$abc:example.org",
+            };
+            const replyText = "<testing1234>";
+            const replyHtml = "&lt;testing1234&gt;";
+
+            const expectedPlainContent = {
+                "m.relates_to": {
+                    "m.in_reply_to": {
+                        "event_id": originalEvent.event_id,
+                    },
+                },
+                msgtype: "m.text",
+                format: "org.matrix.custom.html",
+                body: `> <${originalEvent.sender}> ${originalEvent.content.body}\n\n${replyText}`,
+                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a> <a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
+            };
+
+            const expectedContent = {
+                encrypted: true,
+            };
+
+            client.crypto.isRoomEncrypted = async () => true; // for this test
+            client.crypto.encryptRoomEvent = async (rid, t, c) => {
+                expect(rid).toEqual(roomId);
+                expect(t).toEqual("m.room.message");
+                expect(c).toMatchObject(expectedPlainContent);
+                return expectedContent as any;
+            };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.encrypted/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(expectedContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.replyText(roomId, originalEvent, replyText, replyHtml);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should not try to encrypt in unencrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const originalEvent = {
+                content: {
+                    body: "*Hello World*",
+                    formatted_body: "<i>Hello World</i>",
+                },
+                sender: "@abc:example.org",
+                event_id: "$abc:example.org",
+            };
+            const replyText = "<testing1234>";
+            const replyHtml = "&lt;testing1234&gt;";
+
+            const expectedContent = {
+                "m.relates_to": {
+                    "m.in_reply_to": {
+                        "event_id": originalEvent.event_id,
+                    },
+                },
+                msgtype: "m.text",
+                format: "org.matrix.custom.html",
+                body: `> <${originalEvent.sender}> ${originalEvent.content.body}\n\n${replyText}`,
+                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a> <a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
+            };
+
+            client.crypto.isRoomEncrypted = async () => false; // for this test
 
             http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
                 const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.message/`);
@@ -2776,7 +3266,7 @@ describe('MatrixClient', () => {
                 msgtype: "m.text",
                 format: "org.matrix.custom.html",
                 body: `> <${originalEvent.sender}> ${originalEvent.content.body}\n\n${replyText}`,
-                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a><a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
+                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a> <a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
             };
 
             http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
@@ -2818,8 +3308,102 @@ describe('MatrixClient', () => {
                 msgtype: "m.text",
                 format: "org.matrix.custom.html",
                 body: `> <${originalEvent.sender}> ${originalEvent.content.body}\n\n${replyText}`,
-                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a><a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
+                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a> <a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
             };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.message/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(expectedContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.replyHtmlText(roomId, originalEvent, replyHtml);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should try to encrypt in encrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const originalEvent = {
+                content: {
+                    body: "*Hello World*",
+                    formatted_body: "<i>Hello World</i>",
+                },
+                sender: "@abc:example.org",
+                event_id: "$abc:example.org",
+            };
+            const replyText = "HELLO WORLD"; // expected
+            const replyHtml = "<h1>Hello World</h1>";
+
+            const expectedPlainContent = {
+                "m.relates_to": {
+                    "m.in_reply_to": {
+                        "event_id": originalEvent.event_id,
+                    },
+                },
+                msgtype: "m.text",
+                format: "org.matrix.custom.html",
+                body: `> <${originalEvent.sender}> ${originalEvent.content.body}\n\n${replyText}`,
+                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a> <a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
+            };
+
+            const expectedContent = {
+                encrypted: true,
+            };
+
+            client.crypto.isRoomEncrypted = async () => true; // for this test
+            client.crypto.encryptRoomEvent = async (rid, t, c) => {
+                expect(rid).toEqual(roomId);
+                expect(t).toEqual("m.room.message");
+                expect(c).toMatchObject(expectedPlainContent);
+                return expectedContent as any;
+            };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.encrypted/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(expectedContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.replyHtmlText(roomId, originalEvent, replyHtml);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should not try to encrypt in unencrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const originalEvent = {
+                content: {
+                    body: "*Hello World*",
+                    formatted_body: "<i>Hello World</i>",
+                },
+                sender: "@abc:example.org",
+                event_id: "$abc:example.org",
+            };
+            const replyText = "HELLO WORLD"; // expected
+            const replyHtml = "<h1>Hello World</h1>";
+
+            const expectedContent = {
+                "m.relates_to": {
+                    "m.in_reply_to": {
+                        "event_id": originalEvent.event_id,
+                    },
+                },
+                msgtype: "m.text",
+                format: "org.matrix.custom.html",
+                body: `> <${originalEvent.sender}> ${originalEvent.content.body}\n\n${replyText}`,
+                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a> <a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
+            };
+
+            client.crypto.isRoomEncrypted = async () => false; // for this test
 
             http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
                 const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.message/`);
@@ -2860,8 +3444,102 @@ describe('MatrixClient', () => {
                 msgtype: "m.notice",
                 format: "org.matrix.custom.html",
                 body: `> <${originalEvent.sender}> ${originalEvent.content.body}\n\n${replyText}`,
-                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a><a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
+                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a> <a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
             };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.message/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(expectedContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.replyNotice(roomId, originalEvent, replyText, replyHtml);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should try to encrypt in encrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const originalEvent = {
+                content: {
+                    body: "*Hello World*",
+                    formatted_body: "<i>Hello World</i>",
+                },
+                sender: "@abc:example.org",
+                event_id: "$abc:example.org",
+            };
+            const replyText = "<testing1234>";
+            const replyHtml = "&lt;testing1234&gt;";
+
+            const expectedPlainContent = {
+                "m.relates_to": {
+                    "m.in_reply_to": {
+                        "event_id": originalEvent.event_id,
+                    },
+                },
+                msgtype: "m.notice",
+                format: "org.matrix.custom.html",
+                body: `> <${originalEvent.sender}> ${originalEvent.content.body}\n\n${replyText}`,
+                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a> <a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
+            };
+
+            const expectedContent = {
+                encrypted: true,
+            };
+
+            client.crypto.isRoomEncrypted = async () => true; // for this test
+            client.crypto.encryptRoomEvent = async (rid, t, c) => {
+                expect(rid).toEqual(roomId);
+                expect(t).toEqual("m.room.message");
+                expect(c).toMatchObject(expectedPlainContent);
+                return expectedContent as any;
+            };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.encrypted/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(expectedContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.replyNotice(roomId, originalEvent, replyText, replyHtml);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should not try to encrypt in unencrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const originalEvent = {
+                content: {
+                    body: "*Hello World*",
+                    formatted_body: "<i>Hello World</i>",
+                },
+                sender: "@abc:example.org",
+                event_id: "$abc:example.org",
+            };
+            const replyText = "<testing1234>";
+            const replyHtml = "&lt;testing1234&gt;";
+
+            const expectedContent = {
+                "m.relates_to": {
+                    "m.in_reply_to": {
+                        "event_id": originalEvent.event_id,
+                    },
+                },
+                msgtype: "m.notice",
+                format: "org.matrix.custom.html",
+                body: `> <${originalEvent.sender}> ${originalEvent.content.body}\n\n${replyText}`,
+                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a> <a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
+            };
+
+            client.crypto.isRoomEncrypted = async () => false; // for this test
 
             http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
                 const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.message/`);
@@ -2900,7 +3578,7 @@ describe('MatrixClient', () => {
                 msgtype: "m.notice",
                 format: "org.matrix.custom.html",
                 body: `> <${originalEvent.sender}> ${originalEvent.content.body}\n\n${replyText}`,
-                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a><a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
+                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a> <a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
             };
 
             http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
@@ -2942,8 +3620,102 @@ describe('MatrixClient', () => {
                 msgtype: "m.notice",
                 format: "org.matrix.custom.html",
                 body: `> <${originalEvent.sender}> ${originalEvent.content.body}\n\n${replyText}`,
-                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a><a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
+                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a> <a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
             };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.message/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(expectedContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.replyHtmlNotice(roomId, originalEvent, replyHtml);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should try to encrypt in encrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const originalEvent = {
+                content: {
+                    body: "*Hello World*",
+                    formatted_body: "<i>Hello World</i>",
+                },
+                sender: "@abc:example.org",
+                event_id: "$abc:example.org",
+            };
+            const replyText = "HELLO WORLD"; // expected
+            const replyHtml = "<h1>Hello World</h1>";
+
+            const expectedPlainContent = {
+                "m.relates_to": {
+                    "m.in_reply_to": {
+                        "event_id": originalEvent.event_id,
+                    },
+                },
+                msgtype: "m.notice",
+                format: "org.matrix.custom.html",
+                body: `> <${originalEvent.sender}> ${originalEvent.content.body}\n\n${replyText}`,
+                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a> <a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
+            };
+
+            const expectedContent = {
+                encrypted: true,
+            };
+
+            client.crypto.isRoomEncrypted = async () => true; // for this test
+            client.crypto.encryptRoomEvent = async (rid, t, c) => {
+                expect(rid).toEqual(roomId);
+                expect(t).toEqual("m.room.message");
+                expect(c).toMatchObject(expectedPlainContent);
+                return expectedContent as any;
+            };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.encrypted/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(expectedContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.replyHtmlNotice(roomId, originalEvent, replyHtml);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should not try to encrypt in unencrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const originalEvent = {
+                content: {
+                    body: "*Hello World*",
+                    formatted_body: "<i>Hello World</i>",
+                },
+                sender: "@abc:example.org",
+                event_id: "$abc:example.org",
+            };
+            const replyText = "HELLO WORLD"; // expected
+            const replyHtml = "<h1>Hello World</h1>";
+
+            const expectedContent = {
+                "m.relates_to": {
+                    "m.in_reply_to": {
+                        "event_id": originalEvent.event_id,
+                    },
+                },
+                msgtype: "m.notice",
+                format: "org.matrix.custom.html",
+                body: `> <${originalEvent.sender}> ${originalEvent.content.body}\n\n${replyText}`,
+                formatted_body: `<mx-reply><blockquote><a href="https://matrix.to/#/${roomId}/${originalEvent.event_id}">In reply to</a> <a href="https://matrix.to/#/${originalEvent.sender}">${originalEvent.sender}</a><br />${originalEvent.content.formatted_body}</blockquote></mx-reply>${replyHtml}`,
+            };
+
+            client.crypto.isRoomEncrypted = async () => false; // for this test
 
             http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
                 const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.message/`);
@@ -2968,6 +3740,65 @@ describe('MatrixClient', () => {
                 body: "Hello World",
                 msgtype: "m.notice",
             };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.message/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(eventContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.sendNotice(roomId, eventContent.body);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should try to encrypt in encrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const eventPlainContent = {
+                body: "Hello World",
+                msgtype: "m.notice",
+            };
+
+            const eventContent = {
+                encrypted: true,
+                body: "Hello World",
+            };
+
+            client.crypto.isRoomEncrypted = async () => true; // for this test
+            client.crypto.encryptRoomEvent = async (rid, t, c) => {
+                expect(rid).toEqual(roomId);
+                expect(t).toEqual("m.room.message");
+                expect(c).toMatchObject(eventPlainContent);
+                return eventContent as any;
+            };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.encrypted/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(eventContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.sendNotice(roomId, eventContent.body);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should not try to encrypt in unencrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const eventContent = {
+                body: "Hello World",
+                msgtype: "m.notice",
+            };
+
+            client.crypto.isRoomEncrypted = async () => false; // for this test
 
             http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
                 const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.message/`);
@@ -3006,6 +3837,69 @@ describe('MatrixClient', () => {
             const result = await client.sendHtmlNotice(roomId, eventContent.formatted_body);
             expect(result).toEqual(eventId);
         });
+
+        it('should try to encrypt in encrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const eventPlainContent = {
+                body: "HELLO WORLD",
+                msgtype: "m.notice",
+                format: "org.matrix.custom.html",
+                formatted_body: "<h1>Hello World</h1>",
+            };
+
+            const eventContent = {
+                encrypted: true,
+                formatted_body: "<h1>Hello World</h1>",
+            };
+
+            client.crypto.isRoomEncrypted = async () => true; // for this test
+            client.crypto.encryptRoomEvent = async (rid, t, c) => {
+                expect(rid).toEqual(roomId);
+                expect(t).toEqual("m.room.message");
+                expect(c).toMatchObject(eventPlainContent);
+                return eventContent as any;
+            };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.encrypted/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(eventContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.sendHtmlNotice(roomId, eventContent.formatted_body);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should not try to encrypt in unencrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const eventContent = {
+                body: "HELLO WORLD",
+                msgtype: "m.notice",
+                format: "org.matrix.custom.html",
+                formatted_body: "<h1>Hello World</h1>",
+            };
+
+            client.crypto.isRoomEncrypted = async () => false; // for this test
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.message/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(eventContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.sendHtmlNotice(roomId, eventContent.formatted_body);
+            expect(result).toEqual(eventId);
+        });
     });
 
     describe('sendText', () => {
@@ -3018,6 +3912,65 @@ describe('MatrixClient', () => {
                 body: "Hello World",
                 msgtype: "m.text",
             };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.message/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(eventContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.sendText(roomId, eventContent.body);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should try to encrypt in encrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const eventPlainContent = {
+                body: "Hello World",
+                msgtype: "m.text",
+            };
+
+            const eventContent = {
+                encrypted: true,
+                body: "Hello World",
+            };
+
+            client.crypto.isRoomEncrypted = async () => true; // for this test
+            client.crypto.encryptRoomEvent = async (rid, t, c) => {
+                expect(rid).toEqual(roomId);
+                expect(t).toEqual("m.room.message");
+                expect(c).toMatchObject(eventPlainContent);
+                return eventContent as any;
+            };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.encrypted/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(eventContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.sendText(roomId, eventContent.body);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should not try to encrypt in unencrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const eventContent = {
+                body: "Hello World",
+                msgtype: "m.text",
+            };
+
+            client.crypto.isRoomEncrypted = async () => false; // for this test
 
             http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
                 const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.message/`);
@@ -3056,6 +4009,69 @@ describe('MatrixClient', () => {
             const result = await client.sendHtmlText(roomId, eventContent.formatted_body);
             expect(result).toEqual(eventId);
         });
+
+        it('should try to encrypt in encrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const eventPlainContent = {
+                body: "HELLO WORLD",
+                msgtype: "m.text",
+                format: "org.matrix.custom.html",
+                formatted_body: "<h1>Hello World</h1>",
+            };
+
+            const eventContent = {
+                encrypted: true,
+                formatted_body: "<h1>Hello World</h1>",
+            };
+
+            client.crypto.isRoomEncrypted = async () => true; // for this test
+            client.crypto.encryptRoomEvent = async (rid, t, c) => {
+                expect(rid).toEqual(roomId);
+                expect(t).toEqual("m.room.message");
+                expect(c).toMatchObject(eventPlainContent);
+                return eventContent as any;
+            };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.encrypted/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(eventContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.sendHtmlText(roomId, eventContent.formatted_body);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should not try to encrypt in unencrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const eventContent = {
+                body: "HELLO WORLD",
+                msgtype: "m.text",
+                format: "org.matrix.custom.html",
+                formatted_body: "<h1>Hello World</h1>",
+            };
+
+            client.crypto.isRoomEncrypted = async () => false; // for this test
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.message/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(eventContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.sendHtmlText(roomId, eventContent.formatted_body);
+            expect(result).toEqual(eventId);
+        });
     });
 
     describe('sendMessage', () => {
@@ -3069,6 +4085,67 @@ describe('MatrixClient', () => {
                 msgtype: "m.text",
                 sample: true,
             };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.message/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(eventContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.sendMessage(roomId, eventContent);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should try to encrypt in encrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const eventPlainContent = {
+                body: "Hello World",
+                msgtype: "m.text",
+                sample: true,
+            };
+
+            const eventContent = {
+                encrypted: true,
+                body: "Hello World",
+            };
+
+            client.crypto.isRoomEncrypted = async () => true; // for this test
+            client.crypto.encryptRoomEvent = async (rid, t, c) => {
+                expect(rid).toEqual(roomId);
+                expect(t).toEqual("m.room.message");
+                expect(c).toMatchObject(eventPlainContent);
+                return eventContent as any;
+            };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.encrypted/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(eventContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.sendMessage(roomId, eventPlainContent);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should not try to encrypt in unencrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const eventContent = {
+                body: "Hello World",
+                msgtype: "m.text",
+                sample: true,
+            };
+
+            client.crypto.isRoomEncrypted = async () => false; // for this test
 
             http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
                 const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/m.room.message/`);
@@ -3104,6 +4181,118 @@ describe('MatrixClient', () => {
 
             http.flushAllExpected();
             const result = await client.sendEvent(roomId, eventType, eventContent);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should try to encrypt in encrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const eventType = "io.t2bot.test";
+            const sEventType = "m.room.encrypted";
+            const eventPlainContent = {
+                testing: "hello world",
+                sample: true,
+            };
+
+            const eventContent = {
+                encrypted: true,
+                body: "Hello World",
+            };
+
+            client.crypto.isRoomEncrypted = async () => true; // for this test
+            client.crypto.encryptRoomEvent = async (rid, t, c) => {
+                expect(rid).toEqual(roomId);
+                expect(t).toEqual(eventType);
+                expect(c).toMatchObject(eventPlainContent);
+                return eventContent as any;
+            };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/${encodeURIComponent(sEventType)}/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(eventContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.sendEvent(roomId, eventType, eventPlainContent);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should not try to encrypt in unencrypted rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const eventType = "io.t2bot.test";
+            const eventContent = {
+                testing: "hello world",
+                sample: true,
+            };
+
+            client.crypto.isRoomEncrypted = async () => false; // for this test
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/${encodeURIComponent(eventType)}/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(eventContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.sendEvent(roomId, eventType, eventContent);
+            expect(result).toEqual(eventId);
+        });
+    });
+
+    describe('sendRawEvent', () => {
+        it('should call the right endpoint', async () => {
+            const {client, http, hsUrl} = createTestClient();
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const eventType = "io.t2bot.test";
+            const eventContent = {
+                testing: "hello world",
+                sample: true,
+            };
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/${encodeURIComponent(eventType)}/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(eventContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.sendEvent(roomId, eventType, eventContent);
+            expect(result).toEqual(eventId);
+        });
+
+        it('should not try to encrypt in any rooms', async () => {
+            const {client, http, hsUrl} = await createPreparedCryptoTestClient("@alice:example.org");
+
+            const roomId = "!testing:example.org";
+            const eventId = "$something:example.org";
+            const eventType = "io.t2bot.test";
+            const eventContent = {
+                testing: "hello world",
+                sample: true,
+            };
+
+            client.crypto.isRoomEncrypted = async () => true; // for this test
+
+            http.when("PUT", "/_matrix/client/r0/rooms").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/rooms/${encodeURIComponent(roomId)}/send/${encodeURIComponent(eventType)}/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject(eventContent);
+                return {event_id: eventId};
+            });
+
+            http.flushAllExpected();
+            const result = await client.sendRawEvent(roomId, eventType, eventContent);
             expect(result).toEqual(eventId);
         });
     });
@@ -3307,7 +4496,7 @@ describe('MatrixClient', () => {
             expect(getStateEventSpy.callCount).toBe(3);
         });
 
-        it('assumes PL0 for state events when no power level information is available', async () => {
+        it('assumes PL0 for non-state events when no power level information is available', async () => {
             const {client} = createTestClient();
 
             const roomId = "!testing:example.org";
@@ -3353,7 +4542,41 @@ describe('MatrixClient', () => {
             const userId = "@testing:example.org";
             const eventType = "m.room.message";
             const isState = true;
-            let plEvent = {state_default: 75, users_default: 99, users: {}};
+            let plEvent = {state_default: 75, events_default: 99, users: {}};
+
+            const getStateEventSpy = simple.mock(client, "getRoomStateEvent").callFn((rid, evType, stateKey) => {
+                expect(rid).toEqual(roomId);
+                expect(evType).toEqual("m.room.power_levels");
+                expect(stateKey).toEqual("");
+                return plEvent;
+            });
+
+            let result;
+
+            plEvent.users[userId] = 75;
+            result = await client.userHasPowerLevelFor(userId, roomId, eventType, isState);
+            expect(result).toBe(true);
+            expect(getStateEventSpy.callCount).toBe(1);
+
+            plEvent.users[userId] = 76;
+            result = await client.userHasPowerLevelFor(userId, roomId, eventType, isState);
+            expect(result).toBe(true);
+            expect(getStateEventSpy.callCount).toBe(2);
+
+            plEvent.users[userId] = 74;
+            result = await client.userHasPowerLevelFor(userId, roomId, eventType, isState);
+            expect(result).toBe(false);
+            expect(getStateEventSpy.callCount).toBe(3);
+        });
+
+        it('uses the events_default parameter', async () => {
+            const {client} = createTestClient();
+
+            const roomId = "!testing:example.org";
+            const userId = "@testing:example.org";
+            const eventType = "m.room.message";
+            const isState = false;
+            let plEvent = {state_default: 99, events_default: 75, users: {}};
 
             const getStateEventSpy = simple.mock(client, "getRoomStateEvent").callFn((rid, evType, stateKey) => {
                 expect(rid).toEqual(roomId);
@@ -3387,7 +4610,7 @@ describe('MatrixClient', () => {
             const userId = "@testing:example.org";
             const eventType = "m.room.message";
             const isState = false;
-            let plEvent = {state_default: 99, users_default: 75, users: {}};
+            let plEvent = {events_default: 75, users_default: 15};
 
             const getStateEventSpy = simple.mock(client, "getRoomStateEvent").callFn((rid, evType, stateKey) => {
                 expect(rid).toEqual(roomId);
@@ -3398,20 +4621,14 @@ describe('MatrixClient', () => {
 
             let result;
 
-            plEvent.users[userId] = 75;
             result = await client.userHasPowerLevelFor(userId, roomId, eventType, isState);
-            expect(result).toBe(true);
+            expect(result).toBe(false);
             expect(getStateEventSpy.callCount).toBe(1);
 
-            plEvent.users[userId] = 76;
+            plEvent.users_default = 76;
             result = await client.userHasPowerLevelFor(userId, roomId, eventType, isState);
             expect(result).toBe(true);
             expect(getStateEventSpy.callCount).toBe(2);
-
-            plEvent.users[userId] = 74;
-            result = await client.userHasPowerLevelFor(userId, roomId, eventType, isState);
-            expect(result).toBe(false);
-            expect(getStateEventSpy.callCount).toBe(3);
         });
 
         it('uses the events[event_type] parameter for non-state events', async () => {
@@ -3421,7 +4638,7 @@ describe('MatrixClient', () => {
             const userId = "@testing:example.org";
             const eventType = "m.room.message";
             const isState = false;
-            let plEvent = {state_default: 99, users_default: 99, events: {}, users: {}};
+            let plEvent = {state_default: 99, events_default: 99, events: {}, users: {}};
             plEvent["events"][eventType] = 75;
 
             const getStateEventSpy = simple.mock(client, "getRoomStateEvent").callFn((rid, evType, stateKey) => {
@@ -3456,7 +4673,7 @@ describe('MatrixClient', () => {
             const userId = "@testing:example.org";
             const eventType = "m.room.message";
             const isState = true;
-            let plEvent = {state_default: 99, users_default: 99, events: {}, users: {}};
+            let plEvent = {state_default: 99, events_default: 99, events: {}, users: {}};
             plEvent["events"][eventType] = 75;
 
             const getStateEventSpy = simple.mock(client, "getRoomStateEvent").callFn((rid, evType, stateKey) => {
@@ -3491,7 +4708,7 @@ describe('MatrixClient', () => {
             const userId = "@testing:example.org";
             const eventType = "m.room.message";
             const isState = false;
-            let plEvent = {state_default: 99, users_default: 75, events: {}, users: {}};
+            let plEvent = {state_default: 99, events_default: 75, events: {}, users: {}};
             plEvent["events"][eventType + "_wrong"] = 99;
 
             const getStateEventSpy = simple.mock(client, "getRoomStateEvent").callFn((rid, evType, stateKey) => {
@@ -3585,6 +4802,227 @@ describe('MatrixClient', () => {
             result = await client.userHasPowerLevelFor(userId, roomId, eventType, isState);
             expect(result).toBe(true);
             expect(getStateEventSpy.callCount).toBe(3);
+        });
+
+        it('rejects string power levels', async () => {
+            const {client} = createTestClient();
+
+            const roomId = "!testing:example.org";
+            const userId = "@testing:example.org";
+            const eventType = "m.room.message";
+            const isState = false;
+            let plEvent = {events:{[eventType]: "10"}, users_default: 0};
+
+            const getStateEventSpy = simple.mock(client, "getRoomStateEvent").callFn((rid, evType, stateKey) => {
+                expect(rid).toEqual(roomId);
+                expect(evType).toEqual("m.room.power_levels");
+                expect(stateKey).toEqual("");
+                return plEvent;
+            });
+
+            let result;
+
+            result = await client.userHasPowerLevelFor(userId, roomId, eventType, isState);
+            expect(result).toBe(true);
+            expect(getStateEventSpy.callCount).toBe(1);
+        });
+    });
+
+    describe('userHasPowerLevelFor', () => {
+        it('throws when a power level event cannot be located', async () => {
+            const {client} = createTestClient();
+
+            const roomId = "!testing:example.org";
+            const userId = "@testing:example.org";
+            const eventType = "m.room.message";
+            const isState = false;
+
+            const getStateEventSpy = simple.mock(client, "getRoomStateEvent").callFn((rid, evType, stateKey) => {
+                expect(rid).toEqual(roomId);
+                expect(evType).toEqual("m.room.power_levels");
+                expect(stateKey).toEqual("");
+                return null;
+            });
+
+            try {
+                await client.userHasPowerLevelFor(userId, roomId, eventType, isState);
+
+                // noinspection ExceptionCaughtLocallyJS
+                throw new Error("Expected call to fail");
+            } catch (e) {
+                expect(e.message).toEqual("No power level event found");
+            }
+            expect(getStateEventSpy.callCount).toBe(1);
+        });
+
+        // Doubles as a test to ensure the right action is used
+        it('uses the users_default parameter', async () => {
+            const {client} = createTestClient();
+
+            const roomId = "!testing:example.org";
+            const userId = "@testing:example.org";
+            const action = PowerLevelAction.Ban;
+            let plEvent = {[action]: 75, users_default: 15};
+
+            const getStateEventSpy = simple.mock(client, "getRoomStateEvent").callFn((rid, evType, stateKey) => {
+                expect(rid).toEqual(roomId);
+                expect(evType).toEqual("m.room.power_levels");
+                expect(stateKey).toEqual("");
+                return plEvent;
+            });
+
+            let result;
+
+            result = await client.userHasPowerLevelForAction(userId, roomId, action);
+            expect(result).toBe(false);
+            expect(getStateEventSpy.callCount).toBe(1);
+
+            plEvent.users_default = 76;
+            result = await client.userHasPowerLevelForAction(userId, roomId, action);
+            expect(result).toBe(true);
+            expect(getStateEventSpy.callCount).toBe(2);
+        });
+
+        it('should work with @room notifications', async () => {
+            const {client} = createTestClient();
+
+            const roomId = "!testing:example.org";
+            const userId = "@testing:example.org";
+            const action = PowerLevelAction.NotifyRoom;
+            let plEvent = {notifications: {room: 75}, users_default: 15};
+
+            const getStateEventSpy = simple.mock(client, "getRoomStateEvent").callFn((rid, evType, stateKey) => {
+                expect(rid).toEqual(roomId);
+                expect(evType).toEqual("m.room.power_levels");
+                expect(stateKey).toEqual("");
+                return plEvent;
+            });
+
+            let result;
+
+            result = await client.userHasPowerLevelForAction(userId, roomId, action);
+            expect(result).toBe(false);
+            expect(getStateEventSpy.callCount).toBe(1);
+
+            plEvent.users_default = 76;
+            result = await client.userHasPowerLevelForAction(userId, roomId, action);
+            expect(result).toBe(true);
+            expect(getStateEventSpy.callCount).toBe(2);
+        });
+
+        it('should work with @room notifications when `notifications` is missing', async () => {
+            const {client} = createTestClient();
+
+            const roomId = "!testing:example.org";
+            const userId = "@testing:example.org";
+            const action = PowerLevelAction.NotifyRoom;
+            let plEvent = {users_default: 15}; // deliberately left out action level
+
+            const getStateEventSpy = simple.mock(client, "getRoomStateEvent").callFn((rid, evType, stateKey) => {
+                expect(rid).toEqual(roomId);
+                expect(evType).toEqual("m.room.power_levels");
+                expect(stateKey).toEqual("");
+                return plEvent;
+            });
+
+            let result;
+
+            result = await client.userHasPowerLevelForAction(userId, roomId, action);
+            expect(result).toBe(false);
+            expect(getStateEventSpy.callCount).toBe(1);
+        });
+
+        it('defaults the user to PL0', async () => {
+            const {client} = createTestClient();
+
+            const roomId = "!testing:example.org";
+            const userId = "@testing:example.org";
+            const action = PowerLevelAction.Ban;
+            let plEvent = {events: {}};
+
+            const getStateEventSpy = simple.mock(client, "getRoomStateEvent").callFn((rid, evType, stateKey) => {
+                expect(rid).toEqual(roomId);
+                expect(evType).toEqual("m.room.power_levels");
+                expect(stateKey).toEqual("");
+                return plEvent;
+            });
+
+            let result;
+
+            plEvent[action] = 0;
+            result = await client.userHasPowerLevelForAction(userId, roomId, action);
+            expect(result).toBe(true);
+            expect(getStateEventSpy.callCount).toBe(1);
+
+            plEvent[action] = 1;
+            result = await client.userHasPowerLevelForAction(userId, roomId, action);
+            expect(result).toBe(false);
+            expect(getStateEventSpy.callCount).toBe(2);
+
+            plEvent[action] = -1;
+            result = await client.userHasPowerLevelForAction(userId, roomId, action);
+            expect(result).toBe(true);
+            expect(getStateEventSpy.callCount).toBe(3);
+        });
+
+        it('defaults the user to PL0 safely', async () => {
+            const {client} = createTestClient();
+
+            const roomId = "!testing:example.org";
+            const userId = "@testing:example.org";
+            const action = PowerLevelAction.Ban;
+            let plEvent = {events: {}, users: {}, [action]: 50};
+
+            const getStateEventSpy = simple.mock(client, "getRoomStateEvent").callFn((rid, evType, stateKey) => {
+                expect(rid).toEqual(roomId);
+                expect(evType).toEqual("m.room.power_levels");
+                expect(stateKey).toEqual("");
+                return plEvent;
+            });
+
+            let result;
+
+            plEvent[action] = 0;
+            result = await client.userHasPowerLevelForAction(userId, roomId, action);
+            expect(result).toBe(true);
+            expect(getStateEventSpy.callCount).toBe(1);
+
+            plEvent[action] = 1;
+            result = await client.userHasPowerLevelForAction(userId, roomId, action);
+            expect(result).toBe(false);
+            expect(getStateEventSpy.callCount).toBe(2);
+
+            plEvent[action] = -1;
+            result = await client.userHasPowerLevelForAction(userId, roomId, action);
+            expect(result).toBe(true);
+            expect(getStateEventSpy.callCount).toBe(3);
+        });
+
+        it('rejects string power levels', async () => {
+            const {client} = createTestClient();
+
+            const roomId = "!testing:example.org";
+            const userId = "@testing:example.org";
+            const action = PowerLevelAction.Ban;
+            let plEvent = {[action]: "40", users_default: 45};
+
+            const getStateEventSpy = simple.mock(client, "getRoomStateEvent").callFn((rid, evType, stateKey) => {
+                expect(rid).toEqual(roomId);
+                expect(evType).toEqual("m.room.power_levels");
+                expect(stateKey).toEqual("");
+                return plEvent;
+            });
+
+            let result;
+
+            result = await client.userHasPowerLevelForAction(userId, roomId, action);
+            expect(result).toBe(false);
+            expect(getStateEventSpy.callCount).toBe(1);
+
+            plEvent[action] = <any>40; // just to be sure (cast required to appease TS)
+            result = await client.userHasPowerLevelForAction(userId, roomId, action);
+            expect(result).toBe(true);
+            expect(getStateEventSpy.callCount).toBe(2);
         });
     });
 
@@ -4852,7 +6290,7 @@ describe('MatrixClient', () => {
                 expect(idOrAlias).toEqual(roomAlias);
                 return roomId;
             });
-    
+
             client.resolveRoom = resolveSpy;
 
             const stateSpy = simple.spy(async (sRoomId, type, stateKey) => {
@@ -4902,6 +6340,336 @@ describe('MatrixClient', () => {
                 expect(stateSpy.callCount).toBe(1);
                 expect(e.message).toEqual("Room is not a space");
             }
+        });
+    });
+
+    describe('uploadDeviceKeys', () => {
+        it('should fail when no encryption', async () => {
+            try {
+                const { client } = createTestClient();
+                await client.uploadDeviceKeys([], {});
+
+                // noinspection ExceptionCaughtLocallyJS
+                throw new Error("Failed to fail");
+            } catch (e) {
+                expect(e.message).toEqual("End-to-end encryption is not enabled");
+            }
+        });
+
+        it('should call the right endpoint', async () => {
+            const userId = "@test:example.org";
+            const { client, http } = createTestClient(null, userId, true);
+
+            client.getWhoAmI = () => Promise.resolve({ user_id: userId, device_id: TEST_DEVICE_ID });
+            client.crypto.updateCounts = () => Promise.resolve();
+            client.checkOneTimeKeyCounts = () => Promise.resolve({});
+            await feedOlmAccount(client);
+            await client.crypto.prepare([]);
+
+            const algorithms = [EncryptionAlgorithm.MegolmV1AesSha2, EncryptionAlgorithm.OlmV1Curve25519AesSha2];
+            const keys: Record<DeviceKeyLabel<DeviceKeyAlgorithm, string>, string> = {
+                [DeviceKeyAlgorithm.Curve25519 + ":" + TEST_DEVICE_ID]: "key1",
+                [DeviceKeyAlgorithm.Ed25519 + ":" + TEST_DEVICE_ID]: "key2",
+            };
+            const counts: OTKCounts = {
+                [OTKAlgorithm.Signed]: 12,
+                [OTKAlgorithm.Unsigned]: 14,
+            };
+
+            http.when("POST", "/_matrix/client/r0/keys/upload").respond(200, (path, content) => {
+                expect(content).toMatchObject({
+                    device_keys: {
+                        user_id: userId,
+                        device_id: TEST_DEVICE_ID,
+                        algorithms: algorithms,
+                        keys: keys,
+                        signatures: {
+                            [userId]: {
+                                [DeviceKeyAlgorithm.Ed25519 + ":" + TEST_DEVICE_ID]: expect.any(String),
+                            },
+                        },
+                    },
+                });
+                return { one_time_key_counts: counts };
+            });
+
+            http.flushAllExpected();
+            const result = await client.uploadDeviceKeys(algorithms, keys);
+            expect(result).toMatchObject(counts);
+        });
+    });
+
+    describe('uploadDeviceOneTimeKeys', () => {
+        it('should fail when no encryption is available', async () => {
+            try {
+                const { client } = createTestClient();
+                await client.uploadDeviceOneTimeKeys({});
+
+                // noinspection ExceptionCaughtLocallyJS
+                throw new Error("Failed to fail");
+            } catch (e) {
+                expect(e.message).toEqual("End-to-end encryption is not enabled");
+            }
+        });
+
+        it('should call the right endpoint', async () => {
+            const userId = "@test:example.org";
+            const { client, http } = createTestClient(null, userId, true);
+
+            const keys: OTKs = {
+                [OTKAlgorithm.Signed]: {
+                    key: "test",
+                    signatures: {
+                        "entity": {
+                            "device": "sig",
+                        },
+                    },
+                },
+                [OTKAlgorithm.Unsigned]: "unsigned",
+            };
+            const counts: OTKCounts = {
+                [OTKAlgorithm.Signed]: 12,
+                [OTKAlgorithm.Unsigned]: 14,
+            };
+
+            http.when("POST", "/_matrix/client/r0/keys/upload").respond(200, (path, content) => {
+                expect(content).toMatchObject({
+                    one_time_keys: keys,
+                });
+                return { one_time_key_counts: counts };
+            });
+
+            http.flushAllExpected();
+            const result = await client.uploadDeviceOneTimeKeys(keys);
+            expect(result).toMatchObject(counts);
+        });
+    });
+
+    describe('checkOneTimeKeyCounts', () => {
+        it('should fail when no encryption is available', async () => {
+            try {
+                const { client } = createTestClient();
+                await client.checkOneTimeKeyCounts();
+
+                // noinspection ExceptionCaughtLocallyJS
+                throw new Error("Failed to fail");
+            } catch (e) {
+                expect(e.message).toEqual("End-to-end encryption is not enabled");
+            }
+        });
+
+        it('should call the right endpoint', async () => {
+            const userId = "@test:example.org";
+            const { client, http } = createTestClient(null, userId, true);
+
+            const counts: OTKCounts = {
+                [OTKAlgorithm.Signed]: 12,
+                [OTKAlgorithm.Unsigned]: 14,
+            };
+
+            http.when("POST", "/_matrix/client/r0/keys/upload").respond(200, (path, content) => {
+                expect(content).toMatchObject({});
+                return { one_time_key_counts: counts };
+            });
+
+            http.flushAllExpected();
+            const result = await client.checkOneTimeKeyCounts();
+            expect(result).toMatchObject(counts);
+        });
+    });
+
+    describe('getUserDevices', () => {
+        it('should call the right endpoint', async () => {
+            const { client, http } = createTestClient();
+
+            const timeout = 15000;
+            const requestBody = {
+                "@alice:example.org": [],
+                "@bob:federated.example.org": [],
+            };
+            const response = {
+                failures: {
+                    "federated.example.org": {
+                        error: "Failed",
+                    },
+                },
+                device_keys: {
+                    "@alice:example.org": {
+                        [TEST_DEVICE_ID]: {
+                            // not populated in this test
+                        },
+                    },
+                },
+            };
+
+            http.when("POST", "/_matrix/client/r0/keys/query").respond(200, (path, content, req) => {
+                expect(content).toMatchObject({ timeout, device_keys: requestBody });
+                return response;
+            });
+
+            http.flushAllExpected();
+            const result = await client.getUserDevices(Object.keys(requestBody), timeout);
+            expect(result).toMatchObject(response);
+        });
+
+        it('should call the right endpoint with a default timeout', async () => {
+            const userId = "@test:example.org";
+            const { client, http } = createTestClient(null, userId, true);
+
+            const requestBody = {
+                "@alice:example.org": [],
+                "@bob:federated.example.org": [],
+            };
+            const response = {
+                failures: {
+                    "federated.example.org": {
+                        error: "Failed",
+                    },
+                },
+                device_keys: {
+                    "@alice:example.org": {
+                        [TEST_DEVICE_ID]: {
+                            // not populated in this test
+                        },
+                    },
+                },
+            };
+
+            http.when("POST", "/_matrix/client/r0/keys/query").respond(200, (path, content, req) => {
+                expect(content).toMatchObject({ timeout: 10000, device_keys: requestBody });
+                return response;
+            });
+
+            http.flushAllExpected();
+            const result = await client.getUserDevices(Object.keys(requestBody));
+            expect(result).toMatchObject(response);
+        });
+    });
+
+    describe('claimOneTimeKeys', () => {
+        it('should fail when no encryption is available', async () => {
+            try {
+                const { client } = createTestClient();
+                await client.claimOneTimeKeys({});
+
+                // noinspection ExceptionCaughtLocallyJS
+                throw new Error("Failed to fail");
+            } catch (e) {
+                expect(e.message).toEqual("End-to-end encryption is not enabled");
+            }
+        });
+
+        it('should call the right endpoint', async () => {
+            const userId = "@test:example.org";
+            const { client, http } = createTestClient(null, userId, true);
+
+            const request = {
+                "@alice:example.org": {
+                    [TEST_DEVICE_ID]: OTKAlgorithm.Signed,
+                },
+                "@bob:federated.example.org": {
+                    [TEST_DEVICE_ID + "_2ND"]: OTKAlgorithm.Unsigned,
+                },
+            };
+            const response = {
+                failures: {
+                    "federated.example.org": {
+                        error: "Failed",
+                    },
+                },
+                one_time_keys: {
+                    "@alice:example.org": {
+                        [TEST_DEVICE_ID]: {
+                            // not populated in this test
+                        },
+                    },
+                },
+            };
+
+            http.when("POST", "/_matrix/client/r0/keys/claim").respond(200, (path, content) => {
+                expect(content).toMatchObject({
+                    timeout: 10000,
+                    one_time_keys: request,
+                });
+                return response;
+            });
+
+            http.flushAllExpected();
+            const result = await client.claimOneTimeKeys(request);
+            expect(result).toMatchObject(response);
+        });
+
+        it('should use the timeout parameter', async () => {
+            const userId = "@test:example.org";
+            const { client, http } = createTestClient(null, userId, true);
+
+            const request = {
+                "@alice:example.org": {
+                    [TEST_DEVICE_ID]: OTKAlgorithm.Signed,
+                },
+                "@bob:federated.example.org": {
+                    [TEST_DEVICE_ID + "_2ND"]: OTKAlgorithm.Unsigned,
+                },
+            };
+            const response = {
+                failures: {
+                    "federated.example.org": {
+                        error: "Failed",
+                    },
+                },
+                one_time_keys: {
+                    "@alice:example.org": {
+                        [TEST_DEVICE_ID]: {
+                            // not populated in this test
+                        },
+                    },
+                },
+            };
+
+            const timeout = 60;
+
+            http.when("POST", "/_matrix/client/r0/keys/claim").respond(200, (path, content) => {
+                expect(content).toMatchObject({
+                    timeout: timeout,
+                    one_time_keys: request,
+                });
+                return response;
+            });
+
+            http.flushAllExpected();
+            const result = await client.claimOneTimeKeys(request, timeout);
+            expect(result).toMatchObject(response);
+        });
+    });
+
+    describe('sendToDevices', () => {
+        it('should call the right endpoint', async () => {
+            const userId = "@test:example.org";
+            const { client, http, hsUrl } = createTestClient(null, userId, true);
+
+            const type = "org.example.message";
+            const messages = {
+                [userId]: {
+                    "*": {
+                        isContent: true,
+                    },
+                },
+                "@alice:example.org": {
+                    [TEST_DEVICE_ID]: {
+                        moreContent: true,
+                    },
+                },
+            };
+
+            http.when("PUT", "/_matrix/client/r0/sendToDevice").respond(200, (path, content) => {
+                const idx = path.indexOf(`${hsUrl}/_matrix/client/r0/sendToDevice/${encodeURIComponent(type)}/`);
+                expect(idx).toBe(0);
+                expect(content).toMatchObject({messages});
+                return {};
+            });
+
+            http.flushAllExpected();
+            await client.sendToDevices(type, messages);
         });
     });
 

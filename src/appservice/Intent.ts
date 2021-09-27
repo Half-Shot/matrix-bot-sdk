@@ -1,8 +1,10 @@
-import { IAppserviceStorageProvider, LogService, MatrixClient, Metrics } from "..";
+import { extractRequestError, IAppserviceStorageProvider, LogService, MatrixClient, Metrics } from "..";
 import { Appservice, IAppserviceOptions } from "./Appservice";
 
 // noinspection TypeScriptPreferShortImport
 import { timedIntentFunctionCall } from "../metrics/decorators";
+import { UnstableAppserviceApis } from "./UnstableAppserviceApis";
+import MatrixError from "../models/MatrixError";
 
 /**
  * An Intent is an intelligent client that tracks things like the user's membership
@@ -22,6 +24,7 @@ export class Intent {
 
     private readonly client: MatrixClient;
     private readonly storage: IAppserviceStorageProvider;
+    private readonly unstableApisInstance: UnstableAppserviceApis;
 
     private knownJoinedRooms: string[] = [];
 
@@ -35,7 +38,7 @@ export class Intent {
         this.metrics = new Metrics(appservice.metrics);
         this.client = new MatrixClient(options.homeserverUrl, options.registration.as_token);
         this.client.metrics = new Metrics(appservice.metrics); // Metrics only go up by one parent
-
+        this.unstableApisInstance = new UnstableAppserviceApis(this.client);
         this.storage = options.storage;
         if (impersonateUserId !== appservice.botUserId) this.client.impersonateUserId(impersonateUserId);
         if (options.joinStrategy) this.client.setJoinStrategy(options.joinStrategy);
@@ -53,6 +56,15 @@ export class Intent {
      */
     public get underlyingClient(): MatrixClient {
         return this.client;
+    }
+
+    /**
+     * Gets the unstable API access class. This is generally not recommended to be
+     * used by appservices.
+     * @return {UnstableAppserviceApis} The unstable API access class.
+     */
+    public get unstableApis(): UnstableAppserviceApis {
+        return this.unstableApisInstance;
     }
 
     /**
@@ -186,8 +198,7 @@ export class Intent {
                     throw {body: result};
                 }
             } catch (err) {
-                if (typeof (err.body) === "string") err.body = JSON.parse(err.body);
-                if (err.body && err.body["errcode"] === "M_USER_IN_USE") {
+                if (err instanceof MatrixError && err.errcode === "M_USER_IN_USE") {
                     await Promise.resolve(this.storage.addRegisteredUser(this.userId));
                     if (this.userId === this.appservice.botUserId) {
                         return null;
@@ -197,7 +208,7 @@ export class Intent {
                     }
                 } else {
                     LogService.error("Appservice", "Encountered error registering user: ");
-                    LogService.error("Appservice", err);
+                    LogService.error("Appservice", extractRequestError(err));
                 }
                 throw err;
             }

@@ -1,4 +1,5 @@
 import { MatrixClient } from "./MatrixClient";
+import MatrixError from "./models/MatrixError";
 
 /**
  * Information about a user on Synapse.
@@ -13,10 +14,10 @@ export interface SynapseUser {
     /**
      * A set of 3PIDs for the user.
      */
-    threepids?: [{
+    threepids?: {
         medium: string;
         address: string;
-    }];
+    }[];
 
     /**
      * The avatar URL (usually MXC URI) for the user, if set.
@@ -236,11 +237,11 @@ export class SynapseAdminApis {
     public async isSelfAdmin(): Promise<boolean> {
         try {
             return await this.isAdmin(await this.client.getUserId());
-        } catch (e) {
-            if (e?.body?.errcode === 'M_FORBIDDEN') {
+        } catch (err) {
+            if (err instanceof MatrixError && err.errcode === 'M_FORBIDDEN') {
                 return false;
             }
-            throw e;
+            throw err;
         }
     }
 
@@ -270,7 +271,7 @@ export class SynapseAdminApis {
     /**
      * Gets a list of state events in a room.
      * @param {string} roomId The room ID to get state for.
-     * @returns {Promise<*[]>} Resolves to the room's state events.
+     * @returns {Promise<any[]>} Resolves to the room's state events.
      */
     public async getRoomState(roomId: string): Promise<any[]> {
         const r = await this.client.doRequest("GET", `/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}/state`);

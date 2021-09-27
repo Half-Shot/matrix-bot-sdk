@@ -5,7 +5,7 @@ import { IJoinRoomStrategy } from "./strategies/JoinRoomStrategy";
 import { UnstableApis } from "./UnstableApis";
 import { IPreprocessor } from "./preprocessors/IPreprocessor";
 import { getRequestFn } from "./request";
-import { LogService } from "./logging/LogService";
+import { extractRequestError, LogService } from "./logging/LogService";
 import { htmlEncode } from "htmlencode";
 import { RichReply } from "./helpers/RichReply";
 import { Metrics } from "./metrics/Metrics";
@@ -21,8 +21,27 @@ import { IdentityClient } from "./identity/IdentityClient";
 import { OpenIDConnectToken } from "./models/OpenIDConnect";
 import { doHttpRequest } from "./http";
 import { htmlToText } from "html-to-text";
-import { MatrixProfileInfo } from "./models/MatrixProfile";
 import { Space, SpaceCreateOptions } from "./models/Spaces";
+import { PowerLevelAction } from "./models/PowerLevelAction";
+import { CryptoClient } from "./e2ee/CryptoClient";
+import {
+    DeviceKeyAlgorithm,
+    DeviceKeyLabel,
+    EncryptionAlgorithm,
+    FallbackKey,
+    MultiUserDeviceListResponse,
+    OTKAlgorithm,
+    OTKClaimResponse,
+    OTKCounts,
+    OTKs,
+} from "./models/Crypto";
+import { requiresCrypto } from "./e2ee/decorators";
+import { ICryptoStorageProvider } from "./storage/ICryptoStorageProvider";
+import { EncryptedRoomEvent } from "./models/events/EncryptedRoomEvent";
+import { IWhoAmI } from "./models/Account";
+
+const SYNC_BACKOFF_MIN_MS = 5000;
+const SYNC_BACKOFF_MAX_MS = 15000;
 
 /**
  * A client that is capable of interacting with a matrix homeserver.
@@ -43,7 +62,15 @@ export class MatrixClient extends EventEmitter {
      *
      * Has no effect if the client is not syncing. Does not apply until the next sync request.
      */
-    public syncingTimeout = 10000;
+    public syncingTimeout = 30000;
+
+    /**
+     * The crypto manager instance for this client. Generally speaking, this shouldn't
+     * need to be accessed but is made available.
+     *
+     * Will be null/undefined if crypto is not possible.
+     */
+    public readonly crypto: CryptoClient;
 
     private userId: string;
     private requestId = 0;
@@ -68,12 +95,29 @@ export class MatrixClient extends EventEmitter {
      * @param {string} homeserverUrl The homeserver's client-server API URL
      * @param {string} accessToken The access token for the homeserver
      * @param {IStorageProvider} storage The storage provider to use. Defaults to MemoryStorageProvider.
+     * @param {ICryptoStorageProvider} cryptoStore Optional crypto storage provider to use. If not supplied,
+     * end-to-end encryption will not be functional in this client.
      */
-    constructor(public readonly homeserverUrl: string, public readonly accessToken: string, private storage: IStorageProvider = null) {
+    constructor(
+        public readonly homeserverUrl: string,
+        public readonly accessToken: string,
+        private storage: IStorageProvider = null,
+        public readonly cryptoStore: ICryptoStorageProvider = null,
+    ) {
         super();
 
         if (this.homeserverUrl.endsWith("/")) {
             this.homeserverUrl = this.homeserverUrl.substring(0, this.homeserverUrl.length - 1);
+        }
+
+        if (this.cryptoStore) {
+            if (!this.storage || this.storage instanceof MemoryStorageProvider) {
+                LogService.warn("MatrixClientLite", "Starting an encryption-capable client with a memory store is not considered a good idea.");
+            }
+            this.crypto = new CryptoClient(this);
+            LogService.debug("MatrixClientLite", "End-to-end encryption client created");
+        } else {
+            // LogService.trace("MatrixClientLite", "Not setting up encryption");
         }
 
         if (!this.storage) this.storage = new MemoryStorageProvider();
@@ -230,7 +274,7 @@ export class MatrixClient extends EventEmitter {
         try {
             return await this.getAccountData(eventType);
         } catch (e) {
-            LogService.warn("MatrixClient", `Error getting ${eventType} account data:`, e);
+            LogService.warn("MatrixClient", `Error getting ${eventType} account data:`, extractRequestError(e));
             return defaultContent;
         }
     }
@@ -248,7 +292,7 @@ export class MatrixClient extends EventEmitter {
         try {
             return await this.getRoomAccountData(eventType, roomId);
         } catch (e) {
-            LogService.warn("MatrixClient", `Error getting ${eventType} room account data in ${roomId}:`, e);
+            LogService.warn("MatrixClient", `Error getting ${eventType} room account data in ${roomId}:`, extractRequestError(e));
             return defaultContent;
         }
     }
@@ -484,10 +528,18 @@ export class MatrixClient extends EventEmitter {
     public getUserId(): Promise<string> {
         if (this.userId) return Promise.resolve(this.userId);
 
-        return this.doRequest("GET", "/_matrix/client/r0/account/whoami").then(response => {
+        return this.getWhoAmI().then(response => {
             this.userId = response["user_id"];
             return this.userId;
         });
+    }
+
+    /**
+     * Gets the user's information from the server directly.
+     * @returns {Promise<IWhoAmI>} The "who am I" response.
+     */
+    public getWhoAmI(): Promise<IWhoAmI> {
+        return this.doRequest("GET", "/_matrix/client/r0/account/whoami");
     }
 
     /**
@@ -502,47 +554,56 @@ export class MatrixClient extends EventEmitter {
      * @param {any} filter The filter to use, or null for none
      * @returns {Promise<any>} Resolves when the client has started syncing
      */
-    public start(filter: any = null): Promise<any> {
+    public async start(filter: any = null): Promise<any> {
         this.stopSyncing = false;
         if (!filter || typeof (filter) !== "object") {
             LogService.trace("MatrixClientLite", "No filter given or invalid object - using defaults.");
             filter = null;
         }
 
-        return this.getUserId().then(async userId => {
-            let createFilter = false;
+        LogService.trace("MatrixClientLite", "Populating joined rooms to avoid excessive join emits");
+        this.lastJoinedRoomIds = await this.getJoinedRooms();
 
-            let existingFilter = await Promise.resolve(this.storage.getFilter());
-            if (existingFilter) {
-                LogService.trace("MatrixClientLite", "Found existing filter. Checking consistency with given filter");
-                if (JSON.stringify(existingFilter.filter) === JSON.stringify(filter)) {
-                    LogService.trace("MatrixClientLite", "Filters match");
-                    this.filterId = existingFilter.id;
-                } else {
-                    createFilter = true;
-                }
+        const userId = await this.getUserId();
+
+        if (this.crypto) {
+            LogService.debug("MatrixClientLite", "Preparing end-to-end encryption");
+            await this.crypto.prepare(this.lastJoinedRoomIds);
+            LogService.info("MatrixClientLite", "End-to-end encryption enabled");
+        }
+
+        let createFilter = false;
+
+        // noinspection ES6RedundantAwait
+        let existingFilter = await Promise.resolve(this.storage.getFilter());
+        if (existingFilter) {
+            LogService.trace("MatrixClientLite", "Found existing filter. Checking consistency with given filter");
+            if (JSON.stringify(existingFilter.filter) === JSON.stringify(filter)) {
+                LogService.trace("MatrixClientLite", "Filters match");
+                this.filterId = existingFilter.id;
             } else {
                 createFilter = true;
             }
+        } else {
+            createFilter = true;
+        }
 
-            if (createFilter && filter) {
-                LogService.trace("MatrixClientLite", "Creating new filter");
-                return this.doRequest("POST", "/_matrix/client/r0/user/" + encodeURIComponent(userId) + "/filter", null, filter).then(async response => {
-                    this.filterId = response["filter_id"];
-                    await Promise.resolve(this.storage.setSyncToken(null));
-                    await Promise.resolve(this.storage.setFilter({
-                        id: this.filterId,
-                        filter: filter,
-                    }));
-                });
-            }
-        }).then(async () => {
-            LogService.trace("MatrixClientLite", "Populating joined rooms to avoid excessive join emits");
-            this.lastJoinedRoomIds = await this.getJoinedRooms();
+        if (createFilter && filter) {
+            LogService.trace("MatrixClientLite", "Creating new filter");
+            return this.doRequest("POST", "/_matrix/client/r0/user/" + encodeURIComponent(userId) + "/filter", null, filter).then(async response => {
+                this.filterId = response["filter_id"];
+                // noinspection ES6RedundantAwait
+                await Promise.resolve(this.storage.setSyncToken(null));
+                // noinspection ES6RedundantAwait
+                await Promise.resolve(this.storage.setFilter({
+                    id: this.filterId,
+                    filter: filter,
+                }));
+            });
+        }
 
-            LogService.trace("MatrixClientLite", "Starting sync with filter ID " + this.filterId);
-            this.startSyncInternal();
-        });
+        LogService.trace("MatrixClientLite", "Starting sync with filter ID " + this.filterId);
+        return this.startSyncInternal();
     }
 
     protected startSyncInternal(): Promise<any> {
@@ -550,6 +611,7 @@ export class MatrixClient extends EventEmitter {
     }
 
     protected async startSync(emitFn: (emitEventType: string, ...payload: any[]) => Promise<any> = null) {
+        // noinspection ES6RedundantAwait
         let token = await Promise.resolve(this.storage.getSyncToken());
 
         const promiseWhile = async () => {
@@ -573,7 +635,10 @@ export class MatrixClient extends EventEmitter {
                     await Promise.resolve(this.storage.setSyncToken(token));
                 }
             } catch (e) {
-                LogService.error("MatrixClientLite", e);
+                LogService.error("MatrixClientLite", "Error handling sync " + extractRequestError(e));
+                const backoffTime = SYNC_BACKOFF_MIN_MS + Math.random() * (SYNC_BACKOFF_MAX_MS - SYNC_BACKOFF_MIN_MS);
+                LogService.info("MatrixClientLite", `Backing off for ${backoffTime}ms`);
+                await new Promise((r) => setTimeout(r, backoffTime));
             }
 
             return promiseWhile();
@@ -594,8 +659,8 @@ export class MatrixClient extends EventEmitter {
         if (this.filterId) conf['filter'] = this.filterId;
         if (this.syncingPresence) conf['presence'] = this.syncingPresence;
 
-        // timeout is 30s if we have a token, otherwise 10min
-        return this.doRequest("GET", "/_matrix/client/r0/sync", conf, null, (token ? 30000 : 600000));
+        // timeout is 40s if we have a token, otherwise 10min
+        return this.doRequest("GET", "/_matrix/client/r0/sync", conf, null, (token ? 40000 : 600000));
     }
 
     @timedMatrixClientFunctionCall()
@@ -603,6 +668,49 @@ export class MatrixClient extends EventEmitter {
         if (!emitFn) emitFn = (e, ...p) => Promise.resolve<any>(this.emit(e, ...p));
 
         if (!raw) return; // nothing to process
+
+        if (raw['device_one_time_keys_count']) {
+            this.crypto?.updateCounts(raw['device_one_time_keys_count']);
+        }
+
+        let unusedFallbacks: string[] = null;
+        if (raw['org.matrix.msc2732.device_unused_fallback_key_types']) {
+            unusedFallbacks = raw['org.matrix.msc2732.device_unused_fallback_key_types'];
+        } else if (raw['device_unused_fallback_key_types']) {
+            unusedFallbacks = raw['device_unused_fallback_key_types'];
+        }
+
+        // XXX: We should be able to detect the presence of the array, but Synapse doesn't tell us about
+        // feature support if we didn't upload one, so assume we're on a latest version of Synapse at least.
+        if (!unusedFallbacks?.includes(OTKAlgorithm.Signed)) {
+            await this.crypto?.updateFallbackKey();
+        }
+
+        if (raw['device_lists']) {
+            const changed = raw['device_lists']['changed'];
+            const removed = raw['device_lists']['left'];
+
+            if (changed) {
+                this.crypto?.flagUsersDeviceListsOutdated(changed, true);
+            }
+            if (removed) {
+                // Don't resync removed device lists: they are uninteresting according to the server so we
+                // don't need them. When we request the user's device list again, we'll pull it all back in.
+                this.crypto?.flagUsersDeviceListsOutdated(removed, false);
+            }
+        }
+
+        // Always process device messages first to ensure there are decryption keys
+        if (raw['to_device']?.['events']) {
+            const inbox = raw['to_device']['events'];
+            for (const message of inbox) {
+                if (message['type'] === 'm.room.encrypted') {
+                    await this.crypto?.processInboundDeviceMessage(message);
+                } else {
+                    // TODO: Emit or do something with unknown messages?
+                }
+            }
+        }
 
         if (raw['groups']) {
             const leave = raw['groups']['leave'] || {};
@@ -712,6 +820,17 @@ export class MatrixClient extends EventEmitter {
 
             for (let event of room['timeline']['events']) {
                 event = await this.processEvent(event);
+                if (event['type'] === 'm.room.encrypted' && await this.crypto?.isRoomEncrypted(roomId)) {
+                    await emitFn("room.encrypted_event", roomId, event);
+                    try {
+                        event = (await this.crypto.decryptRoomEvent(new EncryptedRoomEvent(event), roomId)).raw;
+                        event = await this.processEvent(event);
+                        await emitFn("room.decrypted_event", roomId, event);
+                    } catch (e) {
+                        LogService.error("MatrixClientLite", `Decryption error on ${roomId} ${event['event_id']}`, e);
+                        await emitFn("room.failed_decryption", roomId, event, e);
+                    }
+                }
                 if (event['type'] === 'm.room.message') {
                     await emitFn("room.message", roomId, event);
                 }
@@ -728,13 +847,29 @@ export class MatrixClient extends EventEmitter {
     }
 
     /**
+     * Gets an event for a room. If the event is encrypted, and the client supports encryption,
+     * and the room is encrypted, then this will return a decrypted event.
+     * @param {string} roomId the room ID to get the event in
+     * @param {string} eventId the event ID to look up
+     * @returns {Promise<any>} resolves to the found event
+     */
+    @timedMatrixClientFunctionCall()
+    public async getEvent(roomId: string, eventId: string): Promise<any> {
+        const event = await this.getRawEvent(roomId, eventId);
+        if (event['type'] === 'm.room.encrypted' && await this.crypto?.isRoomEncrypted(roomId)) {
+            return this.processEvent((await this.crypto.decryptRoomEvent(new EncryptedRoomEvent(event), roomId)).raw);
+        }
+        return event;
+    }
+
+    /**
      * Gets an event for a room. Returned as a raw event.
      * @param {string} roomId the room ID to get the event in
      * @param {string} eventId the event ID to look up
      * @returns {Promise<any>} resolves to the found event
      */
     @timedMatrixClientFunctionCall()
-    public getEvent(roomId: string, eventId: string): Promise<any> {
+    public getRawEvent(roomId: string, eventId: string): Promise<any> {
         return this.doRequest("GET", "/_matrix/client/r0/rooms/" + encodeURIComponent(roomId) + "/event/" + encodeURIComponent(eventId))
             .then(ev => this.processEvent(ev));
     }
@@ -879,7 +1014,7 @@ export class MatrixClient extends EventEmitter {
      * @returns {Object} The joined user IDs in the room as an object mapped to a set of profiles.
      */
     @timedMatrixClientFunctionCall()
-    public async getJoinedRoomMembersWithProfiles(roomId: string): Promise<{[userId: string]: MatrixProfileInfo}> {
+    public async getJoinedRoomMembersWithProfiles(roomId: string): Promise<{[userId: string]: {display_name?: string, avatar_url?: string}}> {
         return (await this.doRequest("GET", "/_matrix/client/r0/rooms/" + encodeURIComponent(roomId) + "/joined_members")).joined;
     }
 
@@ -943,6 +1078,7 @@ export class MatrixClient extends EventEmitter {
 
     /**
      * Replies to a given event with the given text. The event is sent with a msgtype of m.text.
+     * The message will be encrypted if the client supports encryption and the room is encrypted.
      * @param {string} roomId the room ID to reply in
      * @param {any} event the event to reply to
      * @param {string} text the text to reply with
@@ -959,6 +1095,7 @@ export class MatrixClient extends EventEmitter {
 
     /**
      * Replies to a given event with the given HTML. The event is sent with a msgtype of m.text.
+     * The message will be encrypted if the client supports encryption and the room is encrypted.
      * @param {string} roomId the room ID to reply in
      * @param {any} event the event to reply to
      * @param {string} html the HTML to reply with.
@@ -973,6 +1110,7 @@ export class MatrixClient extends EventEmitter {
 
     /**
      * Replies to a given event with the given text. The event is sent with a msgtype of m.notice.
+     * The message will be encrypted if the client supports encryption and the room is encrypted.
      * @param {string} roomId the room ID to reply in
      * @param {any} event the event to reply to
      * @param {string} text the text to reply with
@@ -990,6 +1128,7 @@ export class MatrixClient extends EventEmitter {
 
     /**
      * Replies to a given event with the given HTML. The event is sent with a msgtype of m.notice.
+     * The message will be encrypted if the client supports encryption and the room is encrypted.
      * @param {string} roomId the room ID to reply in
      * @param {any} event the event to reply to
      * @param {string} html the HTML to reply with.
@@ -1004,7 +1143,8 @@ export class MatrixClient extends EventEmitter {
     }
 
     /**
-     * Sends a notice to the given room
+     * Sends a notice to the given room. The message will be encrypted if the client supports
+     * encryption and the room is encrypted.
      * @param {string} roomId the room ID to send the notice to
      * @param {string} text the text to send
      * @returns {Promise<string>} resolves to the event ID that represents the message
@@ -1018,7 +1158,8 @@ export class MatrixClient extends EventEmitter {
     }
 
     /**
-     * Sends a notice to the given room with HTML content
+     * Sends a notice to the given room with HTML content. The message will be encrypted if the client supports
+     * encryption and the room is encrypted.
      * @param {string} roomId the room ID to send the notice to
      * @param {string} html the HTML to send
      * @returns {Promise<string>} resolves to the event ID that represents the message
@@ -1034,7 +1175,8 @@ export class MatrixClient extends EventEmitter {
     }
 
     /**
-     * Sends a text message to the given room
+     * Sends a text message to the given room. The message will be encrypted if the client supports
+     * encryption and the room is encrypted.
      * @param {string} roomId the room ID to send the text to
      * @param {string} text the text to send
      * @returns {Promise<string>} resolves to the event ID that represents the message
@@ -1048,7 +1190,8 @@ export class MatrixClient extends EventEmitter {
     }
 
     /**
-     * Sends a text message to the given room with HTML content
+     * Sends a text message to the given room with HTML content. The message will be encrypted if the client supports
+     * encryption and the room is encrypted.
      * @param {string} roomId the room ID to send the text to
      * @param {string} html the HTML to send
      * @returns {Promise<string>} resolves to the event ID that represents the message
@@ -1064,7 +1207,8 @@ export class MatrixClient extends EventEmitter {
     }
 
     /**
-     * Sends a message to the given room
+     * Sends a message to the given room. The message will be encrypted if the client supports
+     * encryption and the room is encrypted.
      * @param {string} roomId the room ID to send the message to
      * @param {object} content the event content to send
      * @returns {Promise<string>} resolves to the event ID that represents the message
@@ -1075,14 +1219,31 @@ export class MatrixClient extends EventEmitter {
     }
 
     /**
-     * Sends an event to the given room
+     * Sends an event to the given room. This will encrypt the event before sending if the room is
+     * encrypted and the client supports encryption. Use sendRawEvent() to avoid this behaviour.
      * @param {string} roomId the room ID to send the event to
      * @param {string} eventType the type of event to send
      * @param {string} content the event body to send
      * @returns {Promise<string>} resolves to the event ID that represents the event
      */
     @timedMatrixClientFunctionCall()
-    public sendEvent(roomId: string, eventType: string, content: any): Promise<string> {
+    public async sendEvent(roomId: string, eventType: string, content: any): Promise<string> {
+        if (await this.crypto?.isRoomEncrypted(roomId)) {
+            content = await this.crypto.encryptRoomEvent(roomId, eventType, content);
+            eventType = "m.room.encrypted";
+        }
+        return this.sendRawEvent(roomId, eventType, content);
+    }
+
+    /**
+     * Sends an event to the given room.
+     * @param {string} roomId the room ID to send the event to
+     * @param {string} eventType the type of event to send
+     * @param {string} content the event body to send
+     * @returns {Promise<string>} resolves to the event ID that represents the event
+     */
+    @timedMatrixClientFunctionCall()
+    public async sendRawEvent(roomId: string, eventType: string, content: any): Promise<string> {
         const txnId = (new Date().getTime()) + "__inc" + (++this.requestId);
         return this.doRequest("PUT", "/_matrix/client/r0/rooms/" + encodeURIComponent(roomId) + "/send/" + encodeURIComponent(eventType) + "/" + encodeURIComponent(txnId), null, content).then(response => {
             return response['event_id'];
@@ -1136,7 +1297,7 @@ export class MatrixClient extends EventEmitter {
     }
 
     /**
-     * Checks if a given user has a required power level
+     * Checks if a given user has a required power level required to send the given event.
      * @param {string} userId the user ID to check the power level of
      * @param {string} roomId the room ID to check the power level in
      * @param {string} eventType the event type to look for in the `events` property of the power levels
@@ -1147,16 +1308,56 @@ export class MatrixClient extends EventEmitter {
     public async userHasPowerLevelFor(userId: string, roomId: string, eventType: string, isState: boolean): Promise<boolean> {
         const powerLevelsEvent = await this.getRoomStateEvent(roomId, "m.room.power_levels", "");
         if (!powerLevelsEvent) {
+            // This is technically supposed to be non-fatal, but it's pretty unreasonable for a room to be missing
+            // power levels.
             throw new Error("No power level event found");
         }
 
         let requiredPower = isState ? 50 : 0;
-        if (isState && powerLevelsEvent["state_default"]) requiredPower = powerLevelsEvent["state_default"];
-        if (!isState && powerLevelsEvent["users_default"]) requiredPower = powerLevelsEvent["users_default"];
-        if (powerLevelsEvent["events"] && powerLevelsEvent["events"][eventType]) requiredPower = powerLevelsEvent["events"][eventType];
+        if (isState && Number.isFinite(powerLevelsEvent["state_default"])) requiredPower = powerLevelsEvent["state_default"];
+        if (!isState && Number.isFinite(powerLevelsEvent["events_default"])) requiredPower = powerLevelsEvent["events_default"];
+        if (Number.isFinite(powerLevelsEvent["events"]?.[eventType])) requiredPower = powerLevelsEvent["events"][eventType];
 
         let userPower = 0;
-        if (powerLevelsEvent["users"] && powerLevelsEvent["users"][userId]) userPower = powerLevelsEvent["users"][userId];
+        if (Number.isFinite(powerLevelsEvent["users_default"])) userPower = powerLevelsEvent["users_default"];
+        if (Number.isFinite(powerLevelsEvent["users"]?.[userId])) userPower = powerLevelsEvent["users"][userId];
+
+        return userPower >= requiredPower;
+    }
+
+    /**
+     * Checks if a given user has a required power level to perform the given action
+     * @param {string} userId the user ID to check the power level of
+     * @param {string} roomId the room ID to check the power level in
+     * @param {PowerLevelAction} action the action to check power level for
+     * @returns {Promise<boolean>} resolves to true if the user has the required power level, resolves to false otherwise
+     */
+    @timedMatrixClientFunctionCall()
+    public async userHasPowerLevelForAction(userId: string, roomId: string, action: PowerLevelAction): Promise<boolean> {
+        const powerLevelsEvent = await this.getRoomStateEvent(roomId, "m.room.power_levels", "");
+        if (!powerLevelsEvent) {
+            // This is technically supposed to be non-fatal, but it's pretty unreasonable for a room to be missing
+            // power levels.
+            throw new Error("No power level event found");
+        }
+
+        const defaultForActions: {[A in PowerLevelAction]: number} = {
+            [PowerLevelAction.Ban]: 50,
+            [PowerLevelAction.Invite]: 50,
+            [PowerLevelAction.Kick]: 50,
+            [PowerLevelAction.RedactEvents]: 50,
+            [PowerLevelAction.NotifyRoom]: 50,
+        };
+
+        let requiredPower = defaultForActions[action];
+
+        let investigate = powerLevelsEvent;
+        action.split('.').forEach(k => (investigate = investigate?.[k]));
+        if (Number.isFinite(investigate)) requiredPower = investigate;
+
+        let userPower = 0;
+        if (Number.isFinite(powerLevelsEvent["users_default"])) userPower = powerLevelsEvent["users_default"];
+        if (Number.isFinite(powerLevelsEvent["users"]?.[userId])) userPower = powerLevelsEvent["users"][userId];
 
         return userPower >= requiredPower;
     }
@@ -1247,7 +1448,8 @@ export class MatrixClient extends EventEmitter {
     }
 
     /**
-     * Uploads data to the homeserver's media repository.
+     * Uploads data to the homeserver's media repository. Note that this will <b>not</b> automatically encrypt
+     * media as it cannot determine if the media should be encrypted.
      * @param {Buffer} data the content to upload.
      * @param {string} contentType the content type of the file. Defaults to application/octet-stream
      * @param {string} filename the name of the file. Optional.
@@ -1261,7 +1463,8 @@ export class MatrixClient extends EventEmitter {
     }
 
     /**
-     * Download content from the homeserver's media repository.
+     * Download content from the homeserver's media repository. Note that this will <b>not</b> automatically decrypt
+     * media as it cannot determine if the media is encrypted.
      * @param {string} mxcUrl The MXC URI for the content.
      * @param {string} allowRemote Indicates to the server that it should not attempt to fetch the
      * media if it is deemed remote. This is to prevent routing loops where the server contacts itself.
@@ -1300,7 +1503,7 @@ export class MatrixClient extends EventEmitter {
             };
             getRequestFn()(params, (err, response, resBody) => {
                 if (err) {
-                    LogService.error("MatrixLiteClient (REQ-" + requestId + ")", err);
+                    LogService.error("MatrixLiteClient (REQ-" + requestId + ")", extractRequestError(err));
                     reject(err);
                 } else {
                     const contentType = response.headers['content-type'] || "application/octet-stream";
@@ -1438,6 +1641,7 @@ export class MatrixClient extends EventEmitter {
      * @param {SpaceCreateOptions} opts The creation options.
      * @returns {Promise<Space>} Resolves to the created space.
      */
+    @timedMatrixClientFunctionCall()
     public async createSpace(opts: SpaceCreateOptions): Promise<Space> {
         const roomCreateOpts = {
             name: opts.name,
@@ -1493,6 +1697,7 @@ export class MatrixClient extends EventEmitter {
      * @throws If the room is not a space or there was an error
      * @returns {Promise<Space>} Resolves to the space.
      */
+    @timedMatrixClientFunctionCall()
     public async getSpace(roomIdOrAlias: string): Promise<Space> {
         const roomId = await this.resolveRoom(roomIdOrAlias);
         const createEvent = await this.getRoomStateEvent(roomId, "m.room.create", "");
@@ -1500,6 +1705,129 @@ export class MatrixClient extends EventEmitter {
             throw new Error("Room is not a space");
         }
         return new Space(roomId, this);
+    }
+
+    /**
+     * Uploads new identity keys for the current device.
+     * @param {EncryptionAlgorithm[]} algorithms The supported algorithms.
+     * @param {Record<DeviceKeyLabel<DeviceKeyAlgorithm, string>, string>} keys The keys for the device.
+     * @returns {Promise<OTKCounts>} Resolves to the current One Time Key counts when complete.
+     */
+    @timedMatrixClientFunctionCall()
+    @requiresCrypto()
+    public async uploadDeviceKeys(algorithms: EncryptionAlgorithm[], keys: Record<DeviceKeyLabel<DeviceKeyAlgorithm, string>, string>): Promise<OTKCounts> {
+        const obj = {
+            user_id: await this.getUserId(),
+            device_id: this.crypto.clientDeviceId,
+            algorithms: algorithms,
+            keys: keys,
+        };
+        obj['signatures'] = await this.crypto.sign(obj);
+        return this.doRequest("POST", "/_matrix/client/r0/keys/upload", null, {
+            device_keys: obj,
+        }).then(r => r['one_time_key_counts']);
+    }
+
+    /**
+     * Uploads One Time Keys for the current device.
+     * @param {OTKs} keys The keys to upload.
+     * @returns {Promise<OTKCounts>} Resolves to the current One Time Key counts when complete.
+     */
+    @timedMatrixClientFunctionCall()
+    @requiresCrypto()
+    public async uploadDeviceOneTimeKeys(keys: OTKs): Promise<OTKCounts> {
+        return this.doRequest("POST", "/_matrix/client/r0/keys/upload", null, {
+            one_time_keys: keys,
+        }).then(r => r['one_time_key_counts']);
+    }
+
+    /**
+     * Gets the current One Time Key counts.
+     * @returns {Promise<OTKCounts>} Resolves to the One Time Key counts.
+     */
+    @timedMatrixClientFunctionCall()
+    @requiresCrypto()
+    public async checkOneTimeKeyCounts(): Promise<OTKCounts> {
+        return this.doRequest("POST", "/_matrix/client/r0/keys/upload", null, {})
+            .then(r => r['one_time_key_counts']);
+    }
+
+    /**
+     * Uploads a fallback One Time Key to the server for usage. This will replace the existing fallback
+     * key.
+     * @param {FallbackKey} fallbackKey The fallback key.
+     * @returns {Promise<OTKCounts>} Resolves to the One Time Key counts.
+     */
+    @timedMatrixClientFunctionCall()
+    @requiresCrypto()
+    public async uploadFallbackKey(fallbackKey: FallbackKey): Promise<OTKCounts> {
+        const keyObj = {
+            [`${OTKAlgorithm.Signed}:${fallbackKey.keyId}`]: fallbackKey.key,
+        };
+        return this.doRequest("POST", "/_matrix/client/r0/keys/upload", null, {
+            "org.matrix.msc2732.fallback_keys": keyObj,
+            "fallback_keys": keyObj,
+        }).then(r => r['one_time_key_counts']);
+    }
+
+    /**
+     * Gets <b>unverified</b> device lists for the given users. The caller is expected to validate
+     * and verify the device lists, including that the returned devices belong to the claimed users.
+     *
+     * Failures with federation are reported in the returned object. Users which did not fail a federation
+     * lookup but have no devices will not appear in either the failures or in the returned devices.
+     *
+     * See https://matrix.org/docs/spec/client_server/r0.6.1#post-matrix-client-r0-keys-query for more
+     * information.
+     * @param {string[]} userIds The user IDs to query.
+     * @param {number} federationTimeoutMs The default timeout for requesting devices over federation. Defaults to
+     * 10 seconds.
+     * @returns {Promise<MultiUserDeviceListResponse>} Resolves to the device list/errors for the requested user IDs.
+     */
+    @timedMatrixClientFunctionCall()
+    public async getUserDevices(userIds: string[], federationTimeoutMs = 10000): Promise<MultiUserDeviceListResponse> {
+        const req = {};
+        for (const userId of userIds) {
+            req[userId] = [];
+        }
+        return this.doRequest("POST", "/_matrix/client/r0/keys/query", {}, {
+            timeout: federationTimeoutMs,
+            device_keys: req,
+        });
+    }
+
+    /**
+     * Claims One Time Keys for a set of user devices, returning those keys. The caller is expected to verify
+     * and validate the returned keys.
+     *
+     * Failures with federation are reported in the returned object.
+     * @param {Record<string, Record<string, OTKAlgorithm>>} userDeviceMap The map of user IDs to device IDs to
+     * OTKAlgorithm to request a claim for.
+     * @param {number} federationTimeoutMs The default timeout for claiming keys over federation. Defaults to
+     * 10 seconds.
+     */
+    @timedMatrixClientFunctionCall()
+    @requiresCrypto()
+    public async claimOneTimeKeys(userDeviceMap: Record<string, Record<string, OTKAlgorithm>>, federationTimeoutMs = 10000): Promise<OTKClaimResponse> {
+        return this.doRequest("POST", "/_matrix/client/r0/keys/claim", {}, {
+            timeout: federationTimeoutMs,
+            one_time_keys: userDeviceMap,
+        });
+    }
+
+    /**
+     * Sends to-device messages to the respective users/devices.
+     * @param {string} type The message type being sent.
+     * @param {Record<string, Record<string, any>>} messages The messages to send, mapped as user ID to
+     * device ID (or "*" to denote all of the user's devices) to message payload (content).
+     * @returns {Promise<void>} Resolves when complete.
+     */
+    @timedMatrixClientFunctionCall()
+    public async sendToDevices(type: string, messages: Record<string, Record<string, any>>): Promise<void> {
+        const txnId = (new Date().getTime()) + "_TDEV__inc" + (++this.requestId);
+        return this.doRequest("PUT", `/_matrix/client/r0/sendToDevice/${encodeURIComponent(type)}/${encodeURIComponent(txnId)}`, null, {
+            messages: messages,
+        });
     }
 
     /**
