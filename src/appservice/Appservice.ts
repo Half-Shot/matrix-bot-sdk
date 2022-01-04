@@ -209,6 +209,13 @@ export interface IAppserviceOptions {
          */
         encryption?: boolean;
     };
+
+    /**
+     * Bind the appservice routes to an existing express Router, rather than to 
+     * a express service. This will mean that calls to begin, stop will not control
+     * the HTTP server.
+     */
+    expressRouter?: express.Router,
 }
 
 /**
@@ -232,7 +239,7 @@ export class Appservice extends EventEmitter {
     private readonly cryptoStorage: IAppserviceCryptoStorageProvider;
     private readonly bridgeInstance = new MatrixBridge(this);
 
-    private app = express();
+    private app?: express.Application;
     private appServer: any;
     private intentsCache: LRU;
     private eventProcessors: { [eventType: string]: IPreprocessor[] } = {};
@@ -266,25 +273,31 @@ export class Appservice extends EventEmitter {
         this.storage = options.storage || new MemoryStorageProvider();
         options.storage = this.storage;
         this.cryptoStorage = options.cryptoStorage;
+        let httpListener: express.Application|express.Router;
+        if (options.expressRouter) {
+            httpListener = options.expressRouter;
+        } else {
+            httpListener = this.app = express();
+            // ETag headers break the tests sometimes, and we don't actually need them anyways for
+            // appservices - none of this should be cached.
+            this.app.set('etag', false);
+        }
 
-        this.app.use(express.json({limit: Number.MAX_SAFE_INTEGER})); // disable limits, use a reverse proxy
-        this.app.use(morgan("combined"));
+        httpListener.use(express.json({limit: Number.MAX_SAFE_INTEGER})); // disable limits, use a reverse proxy
+        httpListener.use(morgan("combined"));
+        
 
-        // ETag headers break the tests sometimes, and we don't actually need them anyways for
-        // appservices - none of this should be cached.
-        this.app.set('etag', false);
-
-        this.app.get("/users/:userId", this.onUser.bind(this));
-        this.app.get("/rooms/:roomAlias", this.onRoomAlias.bind(this));
-        this.app.put("/transactions/:txnId", this.onTransaction.bind(this));
-        this.app.get("/_matrix/app/v1/users/:userId", this.onUser.bind(this));
-        this.app.get("/_matrix/app/v1/rooms/:roomAlias", this.onRoomAlias.bind(this));
-        this.app.put("/_matrix/app/v1/transactions/:txnId", this.onTransaction.bind(this));
-        this.app.get("/_matrix/app/v1/thirdparty/protocol/:protocol", this.onThirdpartyProtocol.bind(this));
-        this.app.get("/_matrix/app/v1/thirdparty/user/:protocol", this.onThirdpartyUser.bind(this));
-        this.app.get("/_matrix/app/v1/thirdparty/user", this.onThirdpartyUser.bind(this));
-        this.app.get("/_matrix/app/v1/thirdparty/location/:protocol", this.onThirdpartyLocation.bind(this));
-        this.app.get("/_matrix/app/v1/thirdparty/location", this.onThirdpartyLocation.bind(this));
+        httpListener.get("/users/:userId", this.onUser.bind(this));
+        httpListener.get("/rooms/:roomAlias", this.onRoomAlias.bind(this));
+        httpListener.put("/transactions/:txnId", this.onTransaction.bind(this));
+        httpListener.get("/_matrix/app/v1/users/:userId", this.onUser.bind(this));
+        httpListener.get("/_matrix/app/v1/rooms/:roomAlias", this.onRoomAlias.bind(this));
+        httpListener.put("/_matrix/app/v1/transactions/:txnId", this.onTransaction.bind(this));
+        httpListener.get("/_matrix/app/v1/thirdparty/protocol/:protocol", this.onThirdpartyProtocol.bind(this));
+        httpListener.get("/_matrix/app/v1/thirdparty/user/:protocol", this.onThirdpartyUser.bind(this));
+        httpListener.get("/_matrix/app/v1/thirdparty/user", this.onThirdpartyUser.bind(this));
+        httpListener.get("/_matrix/app/v1/thirdparty/location/:protocol", this.onThirdpartyLocation.bind(this));
+        httpListener.get("/_matrix/app/v1/thirdparty/location", this.onThirdpartyLocation.bind(this));
 
         // Everything else can 404
 
@@ -361,6 +374,10 @@ export class Appservice extends EventEmitter {
      */
     public begin(): Promise<void> {
         return new Promise<void>((resolve, reject) => {
+            if (!this.app) {
+                resolve();
+                return;
+            }
             this.appServer = this.app.listen(this.options.port, this.options.bindAddress, () => resolve());
         }).then(async () => {
             if (this.options.intentOptions?.encryption) {
