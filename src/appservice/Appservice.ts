@@ -2,6 +2,7 @@ import * as express from "express";
 import { EventEmitter } from "events";
 import * as morgan from "morgan";
 import * as LRU from "lru-cache";
+import { Server } from "http";
 import { stringify } from "querystring";
 
 import { Intent } from "./Intent";
@@ -135,11 +136,14 @@ export interface IAppserviceRegistration {
     // not interested in other options
 }
 
-/**
- * General options for the application service
- * @category Application services
- */
-export interface IAppserviceOptions {
+export interface IAppserviceUnixSocketOption extends IAppserviceOptionsBase {
+    /**
+     * The unix socket to listen on for requests from the homeserver.
+     */
+    unixSocketPath: string;
+}
+
+export interface IAppserviceIPOption extends IAppserviceOptionsBase {
     /**
      * The port to listen for requests from the homeserver on.
      */
@@ -149,6 +153,13 @@ export interface IAppserviceOptions {
      * The bind address to listen for requests on.
      */
     bindAddress: string;
+}
+
+/**
+ * General options for the application service
+ * @category Application services
+ */
+export interface IAppserviceOptionsBase {
 
     /**
      * The name of the homeserver, as presented over federation (eg: "matrix.org")
@@ -209,6 +220,8 @@ export interface IAppserviceOptions {
     };
 }
 
+export type IAppserviceOptions = IAppserviceIPOption|IAppserviceUnixSocketOption;
+
 /**
  * Represents an application service. This provides helper utilities such as tracking
  * of user intents (clients that are aware of their membership in rooms).
@@ -229,11 +242,12 @@ export class Appservice extends EventEmitter {
     private readonly cryptoStorage: IAppserviceCryptoStorageProvider;
     private readonly bridgeInstance = new MatrixBridge(this);
 
-    private app = express();
-    private appServer: any;
-    private intentsCache: LRU<string, Intent>;
-    private eventProcessors: { [eventType: string]: IPreprocessor[] } = {};
-    private pendingTransactions: { [txnId: string]: Promise<any> } = {};
+    private readonly app = express();
+    private readonly intentsCache: LRU<string, Intent>;
+    private readonly eventProcessors: { [eventType: string]: IPreprocessor[] } = {};
+    private readonly pendingTransactions: { [txnId: string]: Promise<any> } = {};
+
+    private appServer?: Server;
 
     /**
      * Creates a new application service.
@@ -365,12 +379,16 @@ export class Appservice extends EventEmitter {
      */
     public begin(): Promise<void> {
         return new Promise<void>((resolve, reject) => {
-            this.appServer = this.app.listen(this.options.port, this.options.bindAddress, () => resolve());
-        }).then(async () => {
-            if (this.options.intentOptions?.encryption) {
-                await this.botIntent.enableEncryption();
+            if ('unixSocketPath' in this.options) {
+                this.appServer = this.app.listen(this.options.unixSocketPath, () => resolve());
             } else {
-                await this.botIntent.ensureRegistered();
+                this.appServer = this.app.listen(this.options.port, this.options.bindAddress, () => resolve());
+            }
+        }).then(() => {
+            if (this.options.intentOptions?.encryption) {
+                return this.botIntent.enableEncryption();
+            } else {
+                return this.botIntent.ensureRegistered();
             }
         });
     }
@@ -974,3 +992,7 @@ export class Appservice extends EventEmitter {
         return this.handleThirdpartyObject(req, res, "location", req.query["alias"] as string);
     }
 }
+function Router(): any {
+    throw new Error("Function not implemented.");
+}
+
